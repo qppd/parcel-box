@@ -4,7 +4,6 @@
 
 - **Developer:** Sajed Lopez Mendoza (@qppd) | QPPD (Quezon Province Programmers/Developers)
 - **Version:** 1.0.0
-- **Last Updated:** February 16, 2026
 - **Repository:** qppd/parcel-box
 - **License:** MIT
 - **Contact:** quezon.province.pd@gmail.com | [Portfolio](https://sajed-mendoza.onrender.com/)
@@ -571,7 +570,6 @@ app.listen(3000);
 **Smart Parcel Locker System v1.0.0**
 - **Status:** Ready for Hardware Assembly & Testing
 - **Framework:** Arduino + ESP32 + IoT Backend
-- **Last Updated:** February 16, 2026
 - **Developed By:** Sajed Lopez Mendoza (@qppd)
 
 **Developer Information:**
@@ -579,14 +577,5 @@ app.listen(3000);
 - **Portfolio:** [sajed-mendoza.onrender.com](https://sajed-mendoza.onrender.com/)
 - **Email:** quezon.province.pd@gmail.com
 - **Location:** Unisan, Quezon Province, Philippines
-- **Specialization:** Full-Stack Development, IoT Systems, Embedded Hardware, Machine Learning
 
-**Skills:**
-- Frontend: HTML5, CSS3
-- Backend: PHP, Node.js, Python
-- Microcontrollers: ESP32, Raspberry Pi, Arduino
-- ML/AI: TensorFlow
-- Databases: MySQL, SQLite, Firebase
-- DevOps: Git, SSH, REST APIs
-
-All documentation, firmware, and design materials are contained within this README. This is a professional, production-grade smart locker system with comprehensive testing, security features, and cloud integration capabilities.
+All documentation, firmware, and design materials are contained within this README. This is a smart parcel locker system with comprehensive testing, security features, and cloud integration capabilities.
