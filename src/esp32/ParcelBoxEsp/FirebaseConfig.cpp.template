@@ -1,0 +1,117 @@
+#include "FirebaseConfig.h"
+
+// ============================================================================
+// FIREBASE CONFIGURATION TEMPLATE - Smart Parcel Locker
+// ============================================================================
+// INSTRUCTIONS FOR SETUP:
+//
+// 1. Create a Firebase project at https://console.firebase.google.com/
+// 2. Set up Realtime Database (NOT Firestore) in Asia regions (recommended)
+// 3. Enable Authentication method you prefer (Anonymous, Email/Password, etc.)
+// 4. Download google-services.json from Firebase Project Settings
+// 5. Copy this file to FirebaseConfig.cpp
+// 6. Extract credentials from google-services.json and replace placeholders:
+//    - firebase_database_url -> getFirebaseHost() (domain only)
+//    - api_key -> getApiKey()
+//    - project_id -> getProjectId()
+// 7. IMPORTANT: Add FirebaseConfig.cpp to .gitignore to prevent credential leaks
+// 8. Keep this template in repository as reference
+//
+// Database Structure (create these rules in Firebase):
+// {
+//   "parcels": {
+//     "PARCEL_ID": {
+//       "qr_code": "string",
+//       "timestamp": "long",
+//       "status": "pending|delivered|failed"
+//     }
+//   },
+//   "device_status": {
+//     "device_id": "string",
+//     "wifi_connected": "boolean",
+//     "firebase_connected": "boolean",
+//     "last_update": "long"
+//   },
+//   "locks_status": {
+//     "lock1": {"status": "open|closed", "last_action": "long"},
+//     "lock2": {"status": "open|closed", "last_action": "long"}
+//   },
+//   "history": {
+//     "TIMESTAMP": {
+//       "event": "string",
+//       "parcel_id": "string",
+//       "lock_number": "number"
+//     }
+//   }
+// }
+//
+// SECURITY RULES (Set in Firebase Console):
+// {
+//   "rules": {
+//     "parcels": {
+//       ".read": true,
+//       ".write": "auth.uid != null || root.child('config/allow_anonymous').val() === true"
+//     },
+//     "device_status": {
+//       ".read": true,
+//       ".write": "auth.uid != null || root.child('config/allow_anonymous').val() === true"
+//     },
+//     "locks_status": {
+//       ".read": true,
+//       ".write": "auth.uid != null || root.child('config/allow_anonymous').val() === true"
+//     },
+//     "history": {
+//       ".read": true,
+//       ".write": "auth.uid != null || root.child('config/allow_anonymous').val() === true"
+//     },
+//     "config": {
+//       ".read": true,
+//       ".write": false
+//     }
+//   }
+// }
+
+const char* ParcelBoxFirebaseConfig::getFirebaseHost() {
+    // Extract from google-services.json -> firebase_database_url
+    // Remove "https://" and trailing "/" to get just the domain
+    // Example: "parcelbox-xyz123-default-rtdb.firebaseio.com"
+    return "YOUR_FIREBASE_HOST_HERE";
+}
+
+const char* ParcelBoxFirebaseConfig::getDatabaseURL() {
+    // Complete HTTPS URL format
+    // Example: "https://parcelbox-xyz123-default-rtdb.firebaseio.com"
+    return "YOUR_DATABASE_URL_HERE";
+}
+
+const char* ParcelBoxFirebaseConfig::getApiKey() {
+    // Get from google-services.json -> api_key -> current_key
+    return "YOUR_API_KEY_HERE";
+}
+
+const char* ParcelBoxFirebaseConfig::getProjectId() {
+    // Get from google-services.json -> project_info -> project_id
+    // Example: "parcelbox-xyz123"
+    return "YOUR_PROJECT_ID_HERE";
+}
+
+// Database structure paths
+const char* ParcelBoxFirebaseConfig::getParcelsDatabasePath() {
+    return "/parcels";
+}
+
+const char* ParcelBoxFirebaseConfig::getDeviceStatusPath() {
+    return "/device_status";
+}
+
+const char* ParcelBoxFirebaseConfig::getLocksStatusPath() {
+    return "/locks_status";
+}
+
+const char* ParcelBoxFirebaseConfig::getHistoryPath() {
+    return "/history";
+}
+
+const char* ParcelBoxFirebaseConfig::getConfigPath() {
+    return "/config";
+}

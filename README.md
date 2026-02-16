@@ -197,39 +197,160 @@ BACKEND API ⟷ [WiFi] ⟷ ESP32 ⟷ [Serial/UART] ⟷ Arduino Uno ⟷ Hardware
 5. Serial Monitor @ 115200 should show: "[ARDUINO] Parcel Locker Starting..."
 
 ### ESP32 Firmware
-**File:** `src/esp32/ParcelBoxEsp/ParcelBoxEsp.ino` (346 lines)
+**File:** `src/esp32/ParcelBoxEsp/ParcelBoxEsp.ino` (520+ lines)
+
+**Required Modules:**
+- `PINS_CONFIG.h` - Centralized pin definitions
+- `FirebaseConfig.h/.cpp` - Firebase credentials
+- `WiFiManagerCustom.h/.cpp` - WiFi setup with captive portal
 
 **Add Board Support:**
 1. File → Preferences → Add to "Additional Boards Manager URLs":
 2. `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
 3. Tools → Boards Manager → Search "ESP32" → Install
 
-**Install Libraries:**
+**Install Required Libraries:**
 1. Tools → Manage Libraries
-2. Install: **LiquidCrystal_I2C** v1.1.2 by Frank de Brabander
+2. Search and install:
+   - **LiquidCrystal_I2C** v1.1.2 (Frank de Brabander)
+   - **Firebase Arduino Client Library** (Mobizt) - Latest version
+   - **WiFiManager** (tzapu) v2.0.13 or higher
 
-**Configure WiFi (CRITICAL!):**
-Edit these lines in ParcelBoxEsp.ino BEFORE uploading:
+**Critical Setup BEFORE Upload:**
+1. Configure Firebase credentials in `FirebaseConfig.cpp` (see Firebase Setup section)
+2. Configure pin assignments if different from defaults (edit `PINS_CONFIG.h`)
+3. Create `.gitignore` with `FirebaseConfig.cpp` to prevent credential leaks
 
-```cpp
-const char* WIFI_SSID = "YOUR_SSID";           // ← Change this
-const char* WIFI_PASSWORD = "YOUR_PASSWORD";    // ← Change this
-```
-
-**Upload:**
+**Upload Steps:**
 1. Tools → Board → ESP32 Dev Module
 2. Tools → Upload Speed → 921600
-3. Upload (Ctrl+U)
-4. Serial Monitor @ 115200 should show: "[ESP32] WiFi Connected! IP: ..."
+3. Tools → Partition Scheme → Huge APP (for Firebase library)
+4. Upload (Ctrl+U)
+5. First boot: ESP32 creates "ParcelBox_Setup" WiFi hotspot
+6. Connect phone to hotspot → Browser opens at 192.168.4.1 → Enter WiFi credentials
+7. Serial Monitor @ 115200 should show:
+   ```
+   [ESP32] WiFi Connected!
+   [ESP32] Device registered in Firebase
+   [ESP32] SYSTEM READY - Waiting for parcel
+   ```
 
 ---
 
 ## ⚙️ Configuration & Verification
 
+### Firebase Realtime Database Setup (CRITICAL!)
+
+The ESP32 uses Firebase Realtime Database for:
+- Storing parcel delivery orders
+- Real-time lock status updates
+- Delivery history logging
+- Device health monitoring
+
+#### Step 1: Create Firebase Project
+1. Go to [Firebase Console](https://console.firebase.google.com/)
+2. Click "Create a project"
+3. Enter project name: `parcelbox-yourname`
+4. Accept default settings and create
+
+#### Step 2: Set Up Realtime Database
+1. In Dashboard, click "Realtime Database"
+2. Click "Create Database"
+3. **IMPORTANT:** Select region closest to the locker location (Asia Southeast = optimal)
+4. Start in **Test Mode** (allows reads/writes without authentication)
+5. Click "Enable"
+
+#### Step 3: Get Firebase Credentials
+1. Click the **Settings gear icon** (top left)
+2. Select "Project Settings"
+3. Go to "Service Accounts" tab
+4. Click "Generate new private key" → Downloads `google-services.json`
+5. Open file and copy:
+   - **firebase_database_url:** Extract domain (e.g., `parcelbox-xyz123-default-rtdb.firebaseio.com`)
+   - **api_key:** Under `"api_key": "current_key"`
+   - **project_id:** Under `"project_id"`
+
+#### Step 4: Configure ESP32 Firebase Credentials
+1. Edit `src/esp32/ParcelBoxEsp/FirebaseConfig.cpp`
+2. Replace placeholder values:
+
+```cpp
+const char* ParcelBoxFirebaseConfig::getFirebaseHost() {
+    return "parcelbox-xyz123-default-rtdb.firebaseio.com";  // ← Your host
+}
+
+const char* ParcelBoxFirebaseConfig::getDatabaseURL() {
+    return "https://parcelbox-xyz123-default-rtdb.firebaseio.com";  // ← Your URL
+}
+
+const char* ParcelBoxFirebaseConfig::getApiKey() {
+    return "AIza...YOUR_ACTUAL_KEY..."; // ← Your API key
+}
+
+const char* ParcelBoxFirebaseConfig::getProjectId() {
+    return "parcelbox-xyz123";  // ← Your project ID
+}
+```
+
+3. **SECURITY:** Add `FirebaseConfig.cpp` to `.gitignore`:
+
+```
+# .gitignore
+src/esp32/ParcelBoxEsp/FirebaseConfig.cpp
+```
+
+#### Step 5: Set Firebase Security Rules
+In Firebase Console → Realtime Database → Rules tab, paste:
+
+```json
+{
+  "rules": {
+    "parcels": {
+      ".read": true,
+      ".write": true,
+      "$parcelId": {
+        ".validate": "newData.hasChildren(['qr_code', 'timestamp'])"
+      }
+    },
+    "device_status": {
+      ".read": true,
+      ".write": true
+    },
+    "locks_status": {
+      ".read": true,
+      ".write": true
+    },
+    "history": {
+      ".read": true,
+      ".write": true
+    },
+    "config": {
+      ".read": true,
+      ".write": false
+    }
+  }
+}
+```
+
+Click "Publish" to apply rules.
+
+#### Step 6: Install Arduino Libraries
+In Arduino IDE → Tools → Manage Libraries, install:
+- **Firebase Arduino Client Library** by Mobizt (latest version)
+- **WiFiManager** by tzapu (v2.0.13+)
+
+#### Step 7: Verify Firebase Connection
+Upload to ESP32 and check Serial Monitor:
+```
+[ESP32] Initializing Firebase Realtime Database...
+[ESP32] Device registered in Firebase
+[ESP32] Firebase initialized successfully!
+```
+
 ### WiFi Network
 - **Must be 2.4GHz:** ESP32 doesn't support 5GHz
 - **Test with phone hotspot:** Use "iPhone-Network" as test SSID
-- **Production:** Ensure internet connection for API calls
+- **Production:** Ensure internet connection for Firebase and API calls
 
 ### I2C LCD Address
 If LCD doesn't display, find correct I2C address with scanner code:
@@ -253,16 +374,22 @@ void loop() {
 ```
 
 Common addresses: 0x27 (default), 0x3F, 0x20, 0x38
-Update line 33 in ParcelBoxEsp.ino with found address
+Update `LCD_I2C_ADDRESS` in `PINS_CONFIG.h` with found address
 
-### Backend API Configuration
+### WiFi Manager Setup Portal
+ESP32 will create a captive portal during first boot:
+- **Access Point Name:** `ParcelBox_Setup`
+- **Password:** `password123`
+- **Address:** `192.168.4.1` (auto-opens in browser)
+- **Timeout:** 3 minutes (falls back to offline mode)
+
+To reset WiFi credentials:
 ```cpp
-const char* API_ENDPOINT = "http://api.parcelbox.local/api";
+// Call emergencyLockdown() via hardware button or special command
+// Or restart and power on to 2.4GHz WiFi
 ```
 
-Update to your backend server URL before deployment
-
-### SIM800L Setup
+### SIM800L Setup (Arduino)
 - [ ] Insert valid SIM card into module
 - [ ] Verify SIM has SMS support and credit (~PHP 1-5)
 - [ ] Power module 3+ minutes before use
@@ -270,8 +397,6 @@ Update to your backend server URL before deployment
 - [ ] Attach external antenna if available
 
 ---
-
-
 
 ## ✅ Testing & Validation
 
@@ -499,28 +624,32 @@ app.listen(3000);
 
 ---
 
-## 📊 Complete Delivery Workflow
+## Complete Delivery Workflow (Firebase Integration)
 
 ### Step 1: QR Code Scan
 - Rider scans QR code with scanner module
 - ESP32 receives QR data via UART
 - UART baud: 9600 bps | Example data: "PCL-000123\r\n"
+- System logs event to Firebase: `history/QR_SCANNED`
 
-### Step 2: Backend Validation
-- ESP32 sends HTTP request to backend API
-- Endpoint: POST /api/v1/qr/validate
-- Backend checks database: Is this QR valid?
-- Returns: Valid/Invalid + parcel details
+### Step 2: Firebase Validation (Real-Time)
+- ESP32 queries Firebase Realtime Database
+- Path: `/parcels/{qr_code}`
+- Firebase returns: Valid parcel data OR null (invalid)
+- No need for separate backend API - Firebase handles it
+- Response received in <500ms over WiFi
 
 ### Step 3: Lock Opening (If Valid)
 - ESP32 sends command: "AT+LOCK1,OPEN\r\n"
 - Arduino receives and activates GPIO D2
 - Relay CH1 energizes → Solenoid #1 clicks open
-- 60ms later: ESP32 sends "AT+LOCK2,OPEN\r\n"
+- 500ms later: ESP32 sends "AT+LOCK2,OPEN\r\n"
 - Solenoid #2 (payment box) clicks open
 - Arduino responds: "OK\r\n"
 - ESP32 triggers buzzer: "AT+BUZZ,SUCCESS\r\n"
-- LCD displays: "PLACE PARCEL INSIDE"
+- LCD displays: "DOORS OPEN - Place parcel in box"
+- Firebase updated: `/locks_status/{lock1,lock2}` = "open"
+- Event logged: `history/VALIDATION_SUCCESS`
 
 ### Step 4: Parcel Placement & Payment
 - Rider places parcel in open locker
@@ -531,45 +660,124 @@ app.listen(3000);
 - Arduino monitors D5 (door 1) and D6 (door 2)
 - Reed switches detect magnetic closure
 - When both doors LOW: notify ESP32 "EVENT:DOOR1_CLOSED"
+- Firebase immediately updates: `/locks_status/lock1` = "closed"
 
-### Step 6: Delivery Confirmation
+### Step 6: Real-Time Firebase Update
 - ESP32 confirms both doors closed
 - Sends: "AT+LOCK1,CLOSE" + "AT+LOCK2,CLOSE"
 - Arduino de-energizes relays (locks engage)
-- IoT triggers backend endpoint: POST /api/v1/delivery/confirm
+- ESP32 updates parcel status in Firebase:
+  - Path: `/parcels/{parcel_id}/status` = "delivered"
+  - Timestamp: Current Unix milliseconds
+  - Locker ID: Device ID from Firebase registration
 
-### Step 7: SMS Notification
-- Arduino sends SMS via SIM800L to receiver
-- Message: "Parcel PCL-000123 delivered to Locker 1. Thank you!"
+### Step 7: SMS Notification (Optional - Arduino)
+- Arduino queries SIM800L for SMS capability
+- Can send SMS via SIM800L to receiver
+- Message: "Parcel PCL-000123 delivered. Thank you!"
 - SMS sends within 5 seconds of door closure
 
-### Step 8: System Reset
+### Step 8: History Logging & System Reset
+- Complete delivery event pushed to Firebase:
+  ```json
+  {
+    "parcel_id": "PCL-000123",
+    "event": "PARCEL_DELIVERED",
+    "timestamp": 1708080600000,
+    "device_id": "PARCELBOX_AABBCCDD"
+  }
+  ```
 - Clears parcel data from memory
 - Resets locks to secure position
-- LCD returns to: "READY - Waiting for QR"
+- LCD returns to: "READY - Scan parcel QR"
 - System ready for next delivery
+
+### Firebase Real-Time Monitoring Dashboard
+During operation, you can view live updates in Firebase Console:
+
+**Device Status (Auto-updating every 5 seconds):**
+```
+device_status/
+  └─ device_id: "PARCELBOX_A0B1C2D3"
+  └─ wifi_connected: true
+  └─ firebase_connected: true
+  └─ last_heartbeat: 1708080600000
+```
+
+**Lock Status (Real-time):**
+```
+locks_status/
+  ├─ lock1/
+  │  ├─ status: "closed"
+  │  └─ last_update: 1708080595000
+  └─ lock2/
+     ├─ status: "closed"
+     └─ last_update: 1708080595000
+```
+
+**Parcel Records:**
+```
+parcels/
+  └─ PCL-000123/
+     ├─ qr_code: "PCL-000123"
+     ├─ timestamp: 1708080500000
+     ├─ status: "delivered"
+     └─ locker_compartment: 1
+```
+
+**Delivery History:**
+```
+history/
+  ├─ -MzK5xY8aB_1/
+  │  ├─ parcel_id: "PCL-000123"
+  │  ├─ event: "QR_SCANNED"
+  │  └─ timestamp: 1708080600100
+  ├─ -MzK5xY8aB_2/
+  │  ├─ parcel_id: "PCL-000123"
+  │  ├─ event: "VALIDATION_SUCCESS"
+  │  └─ timestamp: 1708080600200
+  └─ -MzK5xY8aB_3/
+     ├─ parcel_id: "PCL-000123"
+     ├─ event: "PARCEL_DELIVERED"
+     └─ timestamp: 1708080630000
+```
 
 ### Security: Unauthorized Access Detection
 - If door opens WITHOUT valid QR scan:
-- Reed switch detects door opening
+- Reed switch detects door opening (Firebase not updated)
 - System checks scan log: valid scan in past 5 minutes?
 - If NO: Flag as UNAUTHORIZED ACCESS
-- Send SMS alert to admin
-- Activate emergency lockdown (all locks engage)
+- Event logged to Firebase: `history/UNAUTHORIZED_ACCESS_ATTEMPT`
+- Activate emergency lockdown via `emergencyLockdown()` function
+- System displays: "LOCKDOWN - Contact Admin"
+- All locks engage immediately
 
-### Critical State Variables
-- `last_valid_scan_time` - Prevents duplicate alerts
-- `door_status` - Tracks open/closed state
-- `parcel_status` - Delivery progress stage
-- `locker_status` - System operational state
+### Critical State Variables (Stored in ESP32 RAM)
+- `device_id` - Generated from MAC address
+- `current_parcel_id` - Active delivery QR code
+- `lock1_open` / `lock2_open` - Lock status tracking
+- `firebase_connected` - Connection state flag
+- `last_scan_time` - Prevents duplicate processing
+
+### Firebase Database Structure
+```
+parcel-box-{projectid}/
+├─ parcels (all pending/delivered parcels)
+├─ device_status (locker health monitoring)
+├─ locks_status (real-time lock state)
+├─ history (complete audit trail)
+└─ config (system configuration)
+```
+
+All data is automatically synced across devices and visible in real-time in the Firebase Console.
 
 ---
 
-## 📝 Footer
-
 **Smart Parcel Locker System v1.0.0**
 - **Status:** Ready for Hardware Assembly & Testing
-- **Framework:** Arduino + ESP32 + IoT Backend
+- **Architecture:** Arduino + ESP32 + Firebase Realtime Database
+- **Cloud Storage:** Unlimited scalability via Google Cloud
+- **Real-Time Monitoring:** Live Firebase Console dashboard
 - **Developed By:** Sajed Lopez Mendoza (@qppd)
 
 **Developer Information:**
@@ -578,4 +786,4 @@ app.listen(3000);
 - **Email:** quezon.province.pd@gmail.com
 - **Location:** Unisan, Quezon Province, Philippines
 
-All documentation, firmware, and design materials are contained within this README. This is a smart parcel locker system with comprehensive testing, security features, and cloud integration capabilities.
+All documentation, firmware, and design materials are contained within this README. This is a smart parcel locker system with comprehensive testing, security features, and cloud integration via Firebase Realtime Database.

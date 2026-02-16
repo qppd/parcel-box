@@ -1,0 +1,146 @@
+# ============================================================================
+# SMART PARCEL LOCKER - .gitignore
+# ============================================================================
+# This file prevents sensitive files from being committed to the repository
+
+# ============================================================================
+# FIREBASE CREDENTIALS (SECURITY CRITICAL!)
+# ============================================================================
+# Never commit actual Firebase configuration with real API keys
+src/esp32/ParcelBoxEsp/FirebaseConfig.cpp
+src/arduino/ParcelBoxUno/FirebaseConfig.cpp
+
+# Keep template files for reference
+# ! src/esp32/ParcelBoxEsp/FirebaseConfig.cpp.template
+# ! src/arduino/ParcelBoxUno/FirebaseConfig.cpp.template
+
+# ============================================================================
+# GOOGLE SERVICES JSON (Android/Web credentials)
+# ============================================================================
+google-services.json
+src/**/google-services.json
+
+# ============================================================================
+# ARDUINO & VS CODE IDE FILES
+# ============================================================================
+# Arduino build artifacts
+build/
+*.o
+*.a
+*.so
+*.d
+
+# Visual Studio Code
+.vscode/
+.codeignore
+*.code-workspace
+
+# Arduino IDE temporary files
+.arduino16/
+.arduino15/
+sketches/
+
+# ============================================================================
+# PLATFORM-SPECIFIC FILES
+# ============================================================================
+# OS Generated files
+.DS_Store
+Thumbs.db
+.windows
+.linux
+.mac
+
+# IDE files
+*.swp
+*.swo
+*~
+.idea/
+.project
+.classpath
+*.sublime-project
+*.sublime-workspace
+
+# ============================================================================
+# BUILD & DEPENDENCY FILES
+# ============================================================================
+# Python environments
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# ============================================================================
+# DEVELOPER-SPECIFIC FILES
+# ============================================================================
+# Personal configuration overrides
+local.config.h
+local.config.cpp
+*.local.h
+*.local.cpp
+
+# Debug logs
+*.log
+debug.log
+esp32_debug/
+arduino_debug/
+
+# ============================================================================
+# TEMPORARY & BACKUP FILES
+# ============================================================================
+*.bak
+*.backup
+*.tmp
+*.temp
+*~
+.~*
+
+# ============================================================================
+# HARDWARE TEST FILES
+# ============================================================================
+# Test sketches and debug code
+test_*.ino
+debug_*.ino
+*_test.cpp
+*_test.h
+
+# ============================================================================
+# DOCUMENTATION ARTIFACTS
+# ============================================================================
+# Generated documentation
+docs/_build/
+.doctrees/
+
+# ============================================================================
+# SECRETS & SENSITIVE INFO
+# ============================================================================
+# Environment files with credentials
+.env
+.env.local
+.env.*.local
+.secrets
+secrets/
+credentials/
+
+# Configuration with embedded keys
+*credentials*
+*secrets*
+*password*
+*api_key*
+
+# ============================================================================
+# WHITELIST (DO COMMIT THESE)
+# ============================================================================
+# These are exceptions - they SHOULD be committed
+!.gitignore
+!README.md
+!LICENSE
+!*.template
+!FirebaseConfig.cpp.template
