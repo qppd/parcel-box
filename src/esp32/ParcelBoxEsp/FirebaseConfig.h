@@ -14,6 +14,10 @@ class ParcelBoxFirebaseConfig {
 public:
     // Get Firebase Host (RTDB domain)
     static const char* getFirebaseHost();
+
+    // Get Firebase Auth Token (Database Secret)
+    // Found in: Firebase Console -> Project Settings -> Service accounts -> Database secrets
+    static const char* getFirebaseAuth();
     
     // Get Database URL (complete HTTPS endpoint)
     static const char* getDatabaseURL();
