@@ -2,85 +2,67 @@
 #define PINS_CONFIG_H
 
 // ============================================================================
-// ESP32 PIN CONFIGURATION - Smart Parcel Locker
+// ESP32 38-PIN CONFIGURATION - Smart Parcel Locker
 // ============================================================================
-// This file centralizes all pin assignments for the ParcelBox system
+// Single-MCU design: ESP32 controls ALL hardware directly.
+// No Arduino Uno in the system.
 
 // ============================================================================
-// ESP32 I2C LCD DISPLAY PINS
+// RELAY CONTROL (Solenoid Locks)
 // ============================================================================
-#define LCD_SDA_PIN 21           // I2C Data line (GPIO21)
-#define LCD_SCL_PIN 22           // I2C Clock line (GPIO22)
+// WARNING: On standard ESP32-WROOM-32, GPIO 34 and 35 are INPUT-ONLY pins.
+// Verify your ESP32 variant supports output on these GPIOs, or use an
+// external I/O expander / different pins if relays do not respond.
+#define RELAY_1_PIN 19           // GPIO34 - Relay CH1 (Parcel door lock)
+#define RELAY_2_PIN 1           // GPIO35 - Relay CH2 (Payment box lock)
+
+// ============================================================================
+// SIM800L GSM MODULE (UART2)
+// ============================================================================
+#define SIM800L_RX_PIN 16        // GPIO16 - ESP32 RX from SIM800L TX
+#define SIM800L_TX_PIN 17        // GPIO17 - ESP32 TX to SIM800L RX
+#define SIM800L_RST_PIN 5        // GPIO5  - SIM800L hardware reset
+#define BAUD_SIM800L 9600        // SIM800L default baud rate
+
+// ============================================================================
+// REED SWITCHES (Door Sensors)
+// ============================================================================
+#define DOOR_SENSOR_1_PIN 12     // GPIO12 - Parcel door reed switch
+#define DOOR_SENSOR_2_PIN 14     // GPIO14 - Payment box reed switch
+
+// ============================================================================
+// BUZZER (LEDC PWM)
+// ============================================================================
+#define BUZZER_PIN 23            // GPIO23 - Piezo buzzer
+#define BUZZER_RESOLUTION 8      // LEDC resolution bits (used with ledcAttach)
+
+// ============================================================================
+// I2C LCD DISPLAY (20x4)
+// ============================================================================
+#define LCD_SDA_PIN 21           // GPIO21 - I2C Data (default ESP32 SDA)
+#define LCD_SCL_PIN 22           // GPIO22 - I2C Clock (default ESP32 SCL)
 #define LCD_I2C_ADDRESS 0x27     // I2C address for 20x4 LCD
 #define LCD_COLS 20              // LCD columns
 #define LCD_ROWS 4               // LCD rows
 
 // ============================================================================
-// ESP32 UART COMMUNICATION PINS
+// QR CODE SCANNER (UART1)
 // ============================================================================
-// Serial0 (Hardware UART) - Arduino Uno Communication
-#define ARDUINO_RX_PIN 3         // GPIO3 - RX from Arduino (Serial RX1)
-#define ARDUINO_TX_PIN 1         // GPIO1 - TX to Arduino (Serial TX1)
-#define BAUD_ARDUINO 115200      // Baud rate for Arduino communication
-
-// Serial2 (Hardware UART) - QR Code Scanner
-#define QR_SCANNER_RX_PIN 16     // GPIO16 - RX from QR Scanner (Serial2 RX)
-#define QR_SCANNER_TX_PIN 17     // GPIO17 - TX to QR Scanner (Serial2 TX)
-#define BAUD_QR_SCANNER 9600     // Baud rate for QR Scanner
+#define QR_SCANNER_RX_PIN 33     // GPIO33 - ESP32 RX from QR Scanner TX
+#define QR_SCANNER_TX_PIN 26     // GPIO26 - ESP32 TX to QR Scanner RX
+#define QR_SCANNER_RST_PIN 25    // GPIO25 - QR Scanner hardware reset (active LOW)
+#define BAUD_QR_SCANNER 9600     // QR scanner baud rate
 
 // ============================================================================
-// ARDUINO UNO PIN CONFIGURATION (Reference for dual-controller setup)
+// USB SERIAL MONITOR
 // ============================================================================
-// Relay Control (Solenoid Locks) - Arduino Digital Pins
-#define RELAY_1_PIN 2            // D2 - Relay channel 1 (Parcel door lock)
-#define RELAY_2_PIN 3            // D3 - Relay channel 2 (Payment box lock)
-
-// Piezo Buzzer - Arduino Digital Pin
-#define BUZZER_PIN 4             // D4 - Piezo buzzer for audio feedback
-
-// Door Sensors (Reed Switches) - Arduino Digital Pins (with pull-up)
-#define DOOR_SENSOR_1_PIN 5      // D5 - Parcel door open/close sensor
-#define DOOR_SENSOR_2_PIN 6      // D6 - Payment box door sensor
-
-// SIM800L GSM Module - Arduino Software Serial
-#define SIM800L_RX_PIN 8         // D8 - RX from SIM800L (SoftwareSerial RX)
-#define SIM800L_TX_PIN 9         // D9 - TX to SIM800L (SoftwareSerial TX)
-#define BAUD_SIM800L 115200      // Baud rate for SIM800L
-
-// ESP32 Communication - Arduino Hardware UART
-#define ESP32_RX_PIN RX1         // RX1 (Serial UART) - RX from ESP32
-#define ESP32_TX_PIN TX1         // TX1 (Serial UART) - TX to ESP32
-#define BAUD_ESP32 115200        // Baud rate for ESP32 communication
+#define BAUD_SERIAL 115200       // USB Serial debug + test commands
 
 // ============================================================================
 // TIMING CONSTANTS (milliseconds)
 // ============================================================================
 #define LOCK_OPERATION_DELAY 500      // Delay between lock operations
-#define BUZZER_SUCCESS_DURATION 200   // Success beep duration (ms)
-#define BUZZER_ALERT_DURATION 300     // Alert beep duration (ms)
-#define SYSTEM_HEALTH_CHECK_INTERVAL 30000  // System health check every 30s
-#define ARDUINO_RESPONSE_TIMEOUT 5000 // Wait for Arduino response (5 seconds)
+#define SMS_COOLDOWN 3000             // Prevent SMS spam (3s)
 #define QR_SCAN_DEBOUNCE 500          // QR scan debounce time
-
-// ============================================================================
-// COMMUNICATION PROTOCOL DEFINITIONS
-// ============================================================================
-// Arduino AT-style Commands
-#define CMD_LOCK_OPEN "AT+LOCK"
-#define CMD_LOCK_CLOSE "AT-LOCK"
-#define CMD_BUZZER "AT+BUZZ"
-#define CMD_STATUS "AT+STATUS"
-#define CMD_SENSOR_READ "AT+SENSOR"
-
-// Response Prefixes
-#define RESPONSE_EVENT "EVENT:"
-#define RESPONSE_STATUS "STATUS:"
-#define RESPONSE_ERROR "ERROR:"
-#define RESPONSE_OK "OK"
-
-// Event Types
-#define EVENT_DOOR_CLOSED "DOOR_CLOSED"
-#define EVENT_UNAUTHORIZED "UNAUTHORIZED"
-#define EVENT_SYSTEM_ERROR "SYSTEM_ERROR"
 
 #endif // PINS_CONFIG_H
