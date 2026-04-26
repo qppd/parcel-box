@@ -135,6 +135,10 @@ credentials/
 *password*
 *api_key*
 
+# Flutter / Firebase app credentials
+**/GoogleService-Info.plist
+src/app/lib/firebase_options.dart
+
 # ============================================================================
 # WHITELIST (DO COMMIT THESE)
 # ============================================================================
