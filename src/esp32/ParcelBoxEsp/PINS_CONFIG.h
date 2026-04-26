@@ -14,7 +14,7 @@
 // Verify your ESP32 variant supports output on these GPIOs, or use an
 // external I/O expander / different pins if relays do not respond.
 #define RELAY_1_PIN 19           // GPIO34 - Relay CH1 (Parcel door lock)
-#define RELAY_2_PIN 1           // GPIO35 - Relay CH2 (Payment box lock)
+#define RELAY_2_PIN 18           // GPIO35 - Relay CH2 (Payment box lock)
 
 // ============================================================================
 // SIM800L GSM MODULE (UART2)

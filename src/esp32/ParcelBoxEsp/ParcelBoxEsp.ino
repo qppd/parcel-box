@@ -51,6 +51,10 @@
 #include "PINS_CONFIG.h"
 #include "FirebaseConfig.h"
 #include "WiFiManagerCustom.h"
+#include "ESPNOW_CONFIG.h"
+
+// ESP-NOW library
+#include <esp_now.h>
 
 // ============================================================================
 // HARDWARE SERIAL PORTS
@@ -99,6 +103,17 @@ struct SystemState {
 // FIREBASE CONNECTION STATE
 // ============================================================================
 bool firebaseInitialized = false;
+
+// ============================================================================
+// ESP-NOW WIRELESS COMMUNICATION
+// ============================================================================
+// ESP32-CAM sends QR codes via ESP-NOW - Main ESP32 receives them
+volatile bool espNowQrAvailable = false;  // Flag set by ESP-NOW callback
+ESPNOW_QRPacket_t espNowPacket;           // Received QR data from ESP32-CAM
+
+// Duplicate scan protection (Layer 2 - main ESP32 side)
+static String lastProcessedEpsNowQR = "";
+static unsigned long lastEspNowProcessTime = 0;
 
 // ============================================================================
 // SERIAL MONITOR FLAGS (toggled via test commands)
@@ -165,6 +180,11 @@ void resetSystem();
 // Serial Testing
 void processSerialCommands();
 void printHelp();
+
+// ESP-NOW
+void setupEspNowReceiver();
+void onEspNowReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len);
+void processEspNowQR();
 
 // Utility
 void generateDeviceId();
@@ -280,7 +300,10 @@ void loop() {
     system_state.firebase_connected = false;
   }
 
-  // Process QR code scanner input (non-blocking)
+  // PRIORITY 1: Process ESP-NOW QR from ESP32-CAM
+  processEspNowQR();
+
+  // PRIORITY 2: Process UART QR scanner input (non-blocking backup)
   processQRScanner();
 
   // Process GSM responses (non-blocking)
@@ -1134,4 +1157,78 @@ void resetSystem() {
 
   closeLocksAfterDelivery();
   displayLCD("SYSTEM RESET", "Ready for next parcel", "", "");
+}
+
+// ============================================================================
+// ESP-NOW RECEIVER FUNCTIONS
+// ============================================================================
+void setupEspNowReceiver() {
+    // ESP-NOW requires WiFi to be in STA mode
+    WiFi.mode(WIFI_STA);
+
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[ESPNOW] ERROR: Init failed");
+        return;
+    }
+
+    // Register receive callback
+    esp_now_register_recv_cb(onEspNowReceived);
+
+    // CRITICAL: Sync ESP-NOW channel with WiFi channel
+    if (WiFi.status() == WL_CONNECTED) {
+        int wifiChannel = WiFi.channel();
+        esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
+        Serial.println("[ESPNOW] Synced to WiFi channel: " + String(wifiChannel));
+    }
+
+    Serial.println("[ESPNOW] Receiver ready - awaiting ESP32-CAM scans");
+}
+
+void onEspNowReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+    if (len != sizeof(ESPNOW_QRPacket_t)) {
+        Serial.println("[ESPNOW] ERROR: Invalid packet size: " + String(len));
+        return;
+    }
+
+    // Copy data to packet structure
+    memcpy(&espNowPacket, data, sizeof(ESPNOW_QRPacket_t));
+
+    // Sanitize: Ensure null termination
+    espNowPacket.qrData[31] = '\0';
+
+    // Sanitize: Remove control characters
+    String qrClean = String(espNowPacket.qrData);
+    qrClean.trim();
+    qrClean.replace("\r", "");
+    qrClean.replace("\n", "");
+    strncpy(espNowPacket.qrData, qrClean.c_str(), 31);
+    espNowPacket.qrData[31] = '\0';
+
+    espNowQrAvailable = true;
+
+    Serial.print("[ESPNOW] QR from CAM: ");
+    Serial.println(espNowPacket.qrData);
+}
+
+void processEspNowQR() {
+    if (!espNowQrAvailable) return;
+    espNowQrAvailable = false;
+
+    String qr_code = String(espNowPacket.qrData);
+
+    // Layer 2: Duplicate scan protection (main ESP32 side)
+    if (qr_code == lastProcessedEpsNowQR &&
+        (millis() - lastEspNowProcessTime) < ESPNOW_DUPLICATE_COOLDOWN) {
+        Serial.println("[ESPNOW] Duplicate ignored: " + qr_code);
+        return;
+    }
+
+    lastProcessedEpsNowQR = qr_code;
+    lastEspNowProcessTime = millis();
+
+    Serial.println("[ESPNOW] Processing: " + qr_code);
+    displayLCD("ESPNOW QR Received", qr_code, "Validating...", "");
+
+    // Process the QR code through normal flow
+    handleParcelScanned(qr_code);
 }
