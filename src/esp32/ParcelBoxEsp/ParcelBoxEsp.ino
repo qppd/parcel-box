@@ -1177,7 +1177,7 @@ void processEspNowQR() {
 
     // Layer 2: Duplicate scan protection (main ESP32 side)
     if (qr_code == lastProcessedEpsNowQR &&
-        (millis() - lastEspNowProcessTime) < ESPN0W_DUPLICATE_COOLDOWN) {
+        (millis() - lastEspNowProcessTime) < ESPNOW_DUPLICATE_COOLDOWN) {
         Serial.println("[ESPNOW] Duplicate ignored: " + qr_code);
         return;
     }
