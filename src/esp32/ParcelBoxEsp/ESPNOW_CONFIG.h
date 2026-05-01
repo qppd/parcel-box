@@ -10,7 +10,7 @@
 // Data structure for ESP-NOW QR code packets
 typedef struct {
   char qrData[32];  // 32-byte payload for QR code data (ESP-NOW max payload)
-  uint3_t packetId;   // Packet sequence number for duplicate detection
+  uint8_t packetId;   // Packet sequence number for duplicate detection
 } ESPNOW_QRPacket_t;
 
 // ============================================================================
