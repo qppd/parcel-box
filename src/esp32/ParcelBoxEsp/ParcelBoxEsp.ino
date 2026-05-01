@@ -1,41 +1,3 @@
-/*
- * ========================================
- * Smart Parcel Locker - ESP32 (38-pin)
- * ========================================
- *
- * Single-MCU design: ESP32 controls ALL hardware directly.
- * Migrated from dual-MCU (ESP32 + Arduino Uno) architecture.
- *
- * Responsibilities:
- * 1. WiFi connectivity with captive portal setup
- * 2. Firebase Realtime Database integration
- * 3. QR code scanner interface via UART1
- * 4. I2C LCD display for status feedback
- * 5. Direct relay control for solenoid locks
- * 6. Reed switch door sensor monitoring
- * 7. Piezo buzzer feedback (LEDC PWM)
- * 8. SIM800L GSM communication via UART2
- * 9. Serial command testing system (USB)
- *
- * Hardware Connections (ESP32 38-pin):
- * - Relay 1 (Lock 1):   GPIO 34
- * - Relay 2 (Lock 2):   GPIO 35
- * - SIM800L RX:          GPIO 16 (UART2)
- * - SIM800L TX:          GPIO 17 (UART2)
- * - SIM800L RST:         GPIO 5
- * - Reed Switch 1:       GPIO 12
- * - Reed Switch 2:       GPIO 14
- * - Buzzer:              GPIO 23
- * - I2C LCD SDA:         GPIO 21
- * - I2C LCD SCL:         GPIO 22
- * - QR Scanner RX:       GPIO 33 (UART1)
- * - QR Scanner TX:       GPIO 26 (UART1)
- * - QR Scanner RST:      GPIO 25
- */
-
-// ============================================================================
-// INCLUDE SECTION
-// ============================================================================
 #include <WiFi.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -169,7 +131,6 @@ void resetSIM800L();
 void sendSMS(String phone, String message);
 
 // QR & Parcel Workflow
-void processQRScanner();
 void processGSM();
 void handleParcelScanned(String qr_code);
 void validateAndOpenLocks(String qr_code);
@@ -223,11 +184,12 @@ void setup() {
   Serial.println("[SETUP 2/7]   SIM800L  -> UART2 RX=16 TX=17 @9600"); Serial.flush();
   sim800l.begin(BAUD_SIM800L, SERIAL_8N1, SIM800L_RX_PIN, SIM800L_TX_PIN);
   sim800l.setTimeout(50);
-  Serial.println("[SETUP 2/7]   QR Scanner -> UART1 RX=33 TX=26 RST=25 @9600"); Serial.flush();
-  pinMode(QR_SCANNER_RST_PIN, OUTPUT);
-  digitalWrite(QR_SCANNER_RST_PIN, HIGH);
-  delay(200);
-  qrScanner.begin(BAUD_QR_SCANNER, SERIAL_8N1, QR_SCANNER_RX_PIN, QR_SCANNER_TX_PIN);
+  // ── Step 2: UARTs ─────────────────────────────────────────────────────────
+  Serial.println("[SETUP 2/7]   SIM800L  -> UART2 RX=16 TX=17 @9600"); Serial.flush();
+  sim800l.begin(BAUD_SIM800L, SERIAL_8N1, SIM800L_RX_PIN, SIM800L_TX_PIN);
+  sim800l.setTimeout(50);
+  Serial.println("[SETUP 2/7]   SIM800L  -> UART2 RX=16 TX=17 @9600"); Serial.flush();
+  Serial.println("[SETUP 2/7] UARTs OK"); Serial.flush();
   qrScanner.setTimeout(100);
   Serial.println("[SETUP 2/7] UARTs OK"); Serial.flush();
 
@@ -302,9 +264,6 @@ void loop() {
 
   // PRIORITY 1: Process ESP-NOW QR from ESP32-CAM
   processEspNowQR();
-
-  // PRIORITY 2: Process UART QR scanner input (non-blocking backup)
-  processQRScanner();
 
   // Process GSM responses (non-blocking)
   processGSM();
@@ -1218,7 +1177,7 @@ void processEspNowQR() {
 
     // Layer 2: Duplicate scan protection (main ESP32 side)
     if (qr_code == lastProcessedEpsNowQR &&
-        (millis() - lastEspNowProcessTime) < ESPNOW_DUPLICATE_COOLDOWN) {
+        (millis() - lastEspNowProcessTime) < ESPN0W_DUPLICATE_COOLDOWN) {
         Serial.println("[ESPNOW] Duplicate ignored: " + qr_code);
         return;
     }

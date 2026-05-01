@@ -46,15 +46,8 @@
 #define LCD_ROWS 4               // LCD rows
 
 // ============================================================================
-// QR CODE SCANNER (UART1)
+// REED SWITCHES (Door Sensors)
 // ============================================================================
-#define QR_SCANNER_RX_PIN 33     // GPIO33 - ESP32 RX from QR Scanner TX
-#define QR_SCANNER_TX_PIN 26     // GPIO26 - ESP32 TX to QR Scanner RX
-#define QR_SCANNER_RST_PIN 25    // GPIO25 - QR Scanner hardware reset (active LOW)
-#define BAUD_QR_SCANNER 9600     // QR scanner baud rate
-
-// ============================================================================
-// USB SERIAL MONITOR
 // ============================================================================
 #define BAUD_SERIAL 115200       // USB Serial debug + test commands
 
@@ -63,6 +56,6 @@
 // ============================================================================
 #define LOCK_OPERATION_DELAY 500      // Delay between lock operations
 #define SMS_COOLDOWN 3000             // Prevent SMS spam (3s)
-#define QR_SCAN_DEBOUNCE 500          // QR scan debounce time
+#define QR_SCAN_DEBOUNCE 500
 
 #endif // PINS_CONFIG_H
