@@ -77,10 +77,21 @@ void setup()
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
 
+    // Check PSRAM availability (critical for camera)
+    if (psramFound()) {
+        Serial.printf("[SETUP] PSRAM found: %d bytes\n", ESP.getPsramSize());
+    } else {
+        Serial.println("[SETUP] WARNING: No PSRAM found! Camera will not work.");
+        Serial.println("[SETUP] Enable PSRAM in Tools -> Board Settings -> PSRAM -> Enabled");
+    }
+
     // Initialize QR Code Reader
     Serial.println("[SETUP] Initializing camera...");
-    reader.setup();
-    Serial.println("[SETUP] Camera ready");
+    if (reader.setup()) {
+        Serial.println("[SETUP] Camera initialized OK");
+    } else {
+        Serial.println("[SETUP] ERROR: Camera init FAILED - check connections");
+    }
 
     // Start QR detection on Core 1
     reader.beginOnCore(1);
@@ -240,9 +251,14 @@ void onQrCodeTask(void *pvParameters)
 
     while (true) {
         if (reader.receiveQrCode(&qrCodeData, 100)) {
+            Serial.println("[QR] Found QRCode");
             if (qrCodeData.valid) {
                 const char* payload = (const char *)qrCodeData.payload;
+                Serial.print("[QR] Payload: ");
+                Serial.println(payload);
                 sendQrCode(payload);
+            } else {
+                Serial.println("[QR] Invalid QR code data");
             }
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
