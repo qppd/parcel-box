@@ -12,8 +12,6 @@
 // Custom configuration modules
 #include "PINS_CONFIG.h"
 #include "FirebaseConfig.h"
-#include "FirebaseManager.h"
-#include "ParcelBoxComm.h"
 #include "WiFiManagerCustom.h"
 #include "ESPNOW_CONFIG.h"
 
@@ -28,9 +26,8 @@ HardwareSerial sim800l(2);    // UART2 for SIM800L (GPIO16 RX / GPIO17 TX)
 HardwareSerial qrScanner(1);  // UART1 for QR Scanner (GPIO33 RX / GPIO26 TX)
 
 // ============================================================================
-// COMMUNICATION ORCHESTRATOR
+// SYSTEM STATE & SETTINGS
 // ============================================================================
-ParcelBoxComm comms;
 WiFiManagerCustom wifiManager;
 Preferences preferences;
 
@@ -154,7 +151,11 @@ void printHelp();
 
 // ESP-NOW — SINGLE PATH
 void setupEspNow();
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+void onEspNowSent(const wifi_tx_info_t *wifi_tx_info, esp_now_send_status_t status);
+#else
 void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status);
+#endif
 void onEspNowReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len);
 void processEspNowQR();
 void syncEspNowChannel();
@@ -662,7 +663,11 @@ void syncEspNowChannel() {
   }
 }
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+void onEspNowSent(const wifi_tx_info_t *wifi_tx_info, esp_now_send_status_t status) {
+#else
 void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+#endif
   // Only log failures to avoid flooding on ACKs
   if (status != ESP_NOW_SEND_SUCCESS) {
     Serial.println(F("[ESPNOW] Send FAILED"));
