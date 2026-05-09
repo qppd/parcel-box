@@ -52,7 +52,11 @@ char lastQrSent[32] = "";
 // FUNCTION DECLARATIONS
 // ============================================================================
 void setupEspNow();
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+void onEspNowSent(const wifi_tx_info_t *wifi_tx_info, esp_now_send_status_t status);
+#else
 void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status);
+#endif
 void sendQrCode(const char* qrPayload);
 void onQrCodeTask(void *pvParameters);
 void blinkLed(int count, int duration);
@@ -144,7 +148,11 @@ void setupEspNow()
 // ============================================================================
 // ESP-NOW SEND CALLBACK
 // ============================================================================
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+void onEspNowSent(const wifi_tx_info_t *wifi_tx_info, esp_now_send_status_t status)
+#else
 void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status)
+#endif
 {
     Serial.print("[ESPNOW] Send status: ");
     Serial.println(status == ESP_NOW_SEND_SUCCESS ? "SUCCESS" : "FAIL");
