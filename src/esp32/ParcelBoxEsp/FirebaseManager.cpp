@@ -5,8 +5,11 @@
 // Remove from project when fully migrated.
 // ============================================================================
 #include "FirebaseManager.h"
-#include <addons/TokenHelper.h>
-#include <addons/RTDBHelper.h>
+// NOTE: TokenHelper.h and RTDBHelper.h intentionally NOT included.
+// Including them causes multiple-definition linker errors because
+// the main .ino also includes them (or used to). These stubs exist
+// only so the linker doesn't complain about missing symbols -- the
+// actual Firebase logic is inline in ParcelBoxEsp.ino now.
 
 FirebaseManager* globalFirebaseManager = nullptr;
 

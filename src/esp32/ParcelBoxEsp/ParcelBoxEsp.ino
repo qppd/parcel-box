@@ -6,8 +6,11 @@
 
 // Firebase library
 #include <Firebase_ESP_Client.h>
-#include <addons/TokenHelper.h>
-#include <addons/RTDBHelper.h>
+// NOTE: TokenHelper.h and RTDBHelper.h are NOT included here.
+// Their functions (printResult, tokenStatusCallback, getTokenType, etc.)
+// are NOT called anywhere in the main code — including them causes
+// multiple-definition linker errors since FirebaseManager.cpp also
+// pulls them in. Only include if you actually call those helpers.
 
 // Custom configuration modules
 #include "PINS_CONFIG.h"
