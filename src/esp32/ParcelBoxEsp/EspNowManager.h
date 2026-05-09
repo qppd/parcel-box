@@ -80,16 +80,19 @@ public:
 
 private:
   char deviceId[32];
-  EspNowMessage lastMessage;
   bool newMessageAvailable;
-  
+
+  // Helper
+  void sendMessage(EspNowMessage& msg);
+
+public:
+  EspNowMessage lastMessage;
+
   // Statistics
   uint32_t messagesSent;
   uint32_t messagesReceived;
   uint32_t messagesFailed;
   
-  // Helper
-  void sendMessage(EspNowMessage& msg);
-};
+  };
 
 #endif // ESPNOW_MANAGER_H

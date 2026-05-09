@@ -237,6 +237,7 @@ void setup() {
     comms.getFirebaseManager()->setEmergencyCallback(onEmergencyFromFirebase);
     
     system_state.firebase_connected = comms.getFirebaseManager()->isReady();
+    firebaseInitialized = system_state.firebase_connected;
     Serial.println("[SETUP 7/7] Communication result: " + String(system_state.firebase_connected ? "CONNECTED" : "FAILED")); Serial.flush();
   } else {
     Serial.println("[SETUP 7/7] Communication SKIPPED (no WiFi)"); Serial.flush();
@@ -605,7 +606,7 @@ void handleDoorClosed(int doorNum) {
 
     // Log delivery event
     if (system_state.firebase_connected && system_state.current_parcel_id.length() > 0) {
-      firebaseManager.logParcelEvent(system_state.device_id, system_state.current_parcel_id, "PARCEL_DELIVERED");
+      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, system_state.current_parcel_id, "PARCEL_DELIVERED");
     }
 
     delay(2000);
@@ -817,40 +818,22 @@ void initializeFirebase() {
     return;
   }
 
-  Serial.println("[FB] Configuring Firebase..."); Serial.flush();
+  Serial.println("[FB] (Re)initializing Firebase..."); Serial.flush();
 
-  // --- Same pattern as the reference (RiceDryer) ---
-  // Uses Database Secret (legacy_token) instead of email/password anonymous auth.
-  // Get your Database Secret:
-  //   Firebase Console -> Project Settings -> Service accounts -> Database secrets
-  config.host          = ParcelBoxFirebaseConfig::getFirebaseHost();
-  config.database_url  = ParcelBoxFirebaseConfig::getDatabaseURL();
-  config.signer.tokens.legacy_token = ParcelBoxFirebaseConfig::getFirebaseAuth();
-  config.timeout.serverResponse = 10 * 1000;  // 10-second server response timeout
-
-  Firebase.begin(&config, &auth);
-  Firebase.reconnectWiFi(true);
-
-  Serial.println("[FB] Firebase.begin() called — waiting for ready..."); Serial.flush();
-
-  // Wait up to 10 seconds for Firebase to become ready
-  unsigned long t = millis();
-  while (!Firebase.ready() && millis() - t < 10000) {
-    Serial.print("."); Serial.flush();
-    delay(500);
+  auto fbMgr = comms.getFirebaseManager();
+  if (!fbMgr->isReady()) {
+    fbMgr->setDeviceId(system_state.device_id);
+    fbMgr->begin();
   }
-  Serial.println(); Serial.flush();
 
-  if (Firebase.ready()) {
+  if (fbMgr->isReady()) {
     Serial.println("[FB] Firebase CONNECTED!"); Serial.flush();
     system_state.firebase_connected = true;
     firebaseInitialized = true;
     registerDeviceInFirebase();
   } else {
     Serial.println("[FB] Firebase FAILED - check Database Secret and RTDB URL."); Serial.flush();
-    Serial.println("[FB] Hint: get DB secret from Firebase Console -> Project Settings -> Service accounts"); Serial.flush();
     system_state.firebase_connected = false;
-    // Still mark initialized so we don't retry on every loop; loop will retry via Firebase.ready()
     firebaseInitialized = true;
   }
 }
@@ -858,8 +841,8 @@ void initializeFirebase() {
 void registerDeviceInFirebase() {
   String devicePath = ParcelBoxFirebaseConfig::getDeviceStatusPath();
 
-  fbdo.setBSSLBufferSize(2048, 1024);
-  fbdo.setResponseSize(2048);
+  comms.getFirebaseManager()->fbdo.setBSSLBufferSize(2048, 1024);
+  comms.getFirebaseManager()->fbdo.setResponseSize(2048);
 
   // Create device status object
   FirebaseJson json;
@@ -871,10 +854,10 @@ void registerDeviceInFirebase() {
   json.set("last_heartbeat", millis());
 
   // Push to Firebase
-  if (Firebase.RTDB.setJSON(&fbdo, devicePath.c_str(), &json)) {
+  if (Firebase.RTDB.setJSON(&comms.getFirebaseManager()->fbdo, devicePath.c_str(), &json)) {
     debugPrint("Device registered in Firebase");
   } else {
-    debugPrint("Failed to register device: " + String(fbdo.errorReason()));
+    debugPrint("Failed to register device: " + String(comms.getFirebaseManager()->fbdo.errorReason()));
   }
 }
 
@@ -889,7 +872,7 @@ void updateFirebaseStatus() {
   String devicePath = ParcelBoxFirebaseConfig::getDeviceStatusPath();
 
   // Update device heartbeat
-  Firebase.RTDB.setInt(&fbdo, (devicePath + "/last_heartbeat").c_str(), millis());
+  Firebase.RTDB.setInt(&comms.getFirebaseManager()->fbdo, (devicePath + "/last_heartbeat").c_str(), millis());
 
   // Update lock status
   String locksPath = ParcelBoxFirebaseConfig::getLocksStatusPath();
@@ -900,7 +883,7 @@ void updateFirebaseStatus() {
   locksJson.set("lock2/status", system_state.lock2_open ? "open" : "closed");
   locksJson.set("lock2/last_update", millis());
 
-  Firebase.RTDB.setJSON(&fbdo, locksPath.c_str(), &locksJson);
+  Firebase.RTDB.setJSON(&comms.getFirebaseManager()->fbdo, locksPath.c_str(), &locksJson);
 }
 
 // ============================================================================
@@ -922,10 +905,10 @@ void logParcelHistory(String parcel_id, String event) {
   historyEntry.set("device_id", system_state.device_id);
 
   // Push entry to history (creates new child with auto-ID)
-  if (Firebase.RTDB.pushJSON(&fbdo, historyPath.c_str(), &historyEntry)) {
+  if (Firebase.RTDB.pushJSON(&comms.getFirebaseManager()->fbdo, historyPath.c_str(), &historyEntry)) {
     debugPrint("History logged: " + parcel_id + " -> " + event);
   } else {
-    debugPrint("Failed to log history: " + String(fbdo.errorReason()));
+    debugPrint("Failed to log history: " + String(comms.getFirebaseManager()->fbdo.errorReason()));
   }
 }
 
@@ -988,7 +971,7 @@ void handleParcelScanned(String qr_code) {
 
   // Log scan event
   if (system_state.firebase_connected) {
-    firebaseManager.logParcelEvent(system_state.device_id, qr_code, "QR_SCANNED");
+    comms.getFirebaseManager()->logParcelEvent(system_state.device_id, qr_code, "QR_SCANNED");
   }
 
   // Validate QR code with backend
@@ -1004,14 +987,14 @@ void validateAndOpenLocks(String qr_code) {
   if (system_state.firebase_connected) {
     String parcelPath = String(ParcelBoxFirebaseConfig::getParcelsDatabasePath()) + "/" + qr_code;
 
-    if (Firebase.RTDB.getJSON(&fbdo, parcelPath.c_str())) {
-      if (fbdo.dataType() == "json") {
+    if (Firebase.RTDB.getJSON(&comms.getFirebaseManager()->fbdo, parcelPath.c_str())) {
+      if (comms.getFirebaseManager()->fbdo.dataType() == "json") {
         is_valid = true;
         system_state.current_parcel_id = qr_code;
 
         debugPrint("Parcel found in Firebase");
         if (system_state.firebase_connected) {
-          firebaseManager.logParcelEvent(system_state.device_id, qr_code, "PARCEL_FOUND");
+          comms.getFirebaseManager()->logParcelEvent(system_state.device_id, qr_code, "PARCEL_FOUND");
         }
       }
     }
@@ -1029,7 +1012,7 @@ void validateAndOpenLocks(String qr_code) {
 
     displayLCD("Access Granted", "Opening locks...", "", "");
     if (system_state.firebase_connected) {
-      firebaseManager.logParcelEvent(system_state.device_id, qr_code, "VALIDATION_SUCCESS");
+      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, qr_code, "VALIDATION_SUCCESS");
     }
 
     // Open parcel door (Lock #1)
@@ -1053,7 +1036,7 @@ void validateAndOpenLocks(String qr_code) {
     displayLCD("Access Denied", "Invalid QR Code", "Try again", "");
 
     if (system_state.firebase_connected) {
-      firebaseManager.logParcelEvent(system_state.device_id, qr_code, "VALIDATION_FAILED");
+      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, qr_code, "VALIDATION_FAILED");
     }
     delay(3000);
     displayLCD("READY", "Scan parcel QR",
@@ -1126,7 +1109,7 @@ void emergencyLockdown() {
   playBuzzer("alert");
 
   if (system_state.firebase_connected) {
-    firebaseManager.logParcelEvent(system_state.device_id, "SYSTEM", "EMERGENCY_LOCKDOWN");
+    comms.getFirebaseManager()->logParcelEvent(system_state.device_id, "SYSTEM", "EMERGENCY_LOCKDOWN");
   }
 }
 
@@ -1149,13 +1132,13 @@ void onLockCommandFromFirebase(int lockNum, bool open) {
     openLock(lockNum);
     displayLCD("Remote: Lock " + String(lockNum), "Opening...", "", "");
     if (system_state.firebase_connected) {
-      firebaseManager.logParcelEvent(system_state.device_id, "remote", "REMOTE_LOCK_" + String(lockNum) + "_OPEN");
+      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, "remote", "REMOTE_LOCK_" + String(lockNum) + "_OPEN");
     }
   } else {
     closeLock(lockNum);
     displayLCD("Remote: Lock " + String(lockNum), "Closing...", "", "");
     if (system_state.firebase_connected) {
-      firebaseManager.logParcelEvent(system_state.device_id, "remote", "REMOTE_LOCK_" + String(lockNum) + "_CLOSE");
+      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, "remote", "REMOTE_LOCK_" + String(lockNum) + "_CLOSE");
     }
   }
 }

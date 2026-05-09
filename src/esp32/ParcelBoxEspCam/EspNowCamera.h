@@ -58,13 +58,15 @@ public:
 private:
   char deviceId[32];
   uint8_t mainEspMac[6];
-  EspNowMessage lastMessage;
   bool newMessageAvailable;
-  
+
   uint32_t qrCodesSent;
-  uint32_t commandsReceived;
-  
+
   void sendMessage(EspNowMessage& msg);
+
+public:
+  EspNowMessage lastMessage;
+  uint32_t commandsReceived;
 };
 
 #endif // ESPNOW_CAMERA_H

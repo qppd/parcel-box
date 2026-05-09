@@ -6,7 +6,7 @@ static EspNowManager* globalEspNowManager = nullptr;
 // ============================================================================
 // ESP-NOW CALLBACKS (Static for C-style callback compatibility)
 // ============================================================================
-static void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+static void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
   if (globalEspNowManager == nullptr) return;
   
   Serial.print("[ESP-NOW] Send Status: ");

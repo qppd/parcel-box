@@ -137,8 +137,8 @@ void FirebaseManager::updateDeviceStatus(const String& deviceId, bool wifiConnec
     json.set("temperature", temperature);
     json.set("humidity", humidity);
     json.set("last_heartbeat", millis());
-    json.set("timestamp", Firebase.serverTimestamp());
-    
+    json.set("timestamp/.sv", "timestamp");
+
     if (Firebase.RTDB.setJSON(&fbdo, statusPath, &json)) {
         Serial.println("[FB] ✅ Device status updated");
     } else {
@@ -158,7 +158,7 @@ void FirebaseManager::updateLockStatus(const String& deviceId, bool lock1Open, b
     json.set("lock2", lock2Open ? "open" : "closed");
     json.set("door1", door1Open ? "open" : "closed");
     json.set("door2", door2Open ? "open" : "closed");
-    json.set("timestamp", Firebase.serverTimestamp());
+    json.set("timestamp/.sv", "timestamp");
     
     if (Firebase.RTDB.setJSON(&fbdo, locksPath, &json)) {
         Serial.println("[FB] ✅ Lock status updated");
@@ -177,7 +177,7 @@ void FirebaseManager::logParcelEvent(const String& deviceId, const String& parce
     FirebaseJson json;
     json.set("event", event);
     json.set("parcel_id", parcelId);
-    json.set("timestamp", Firebase.serverTimestamp());
+    json.set("timestamp/.sv", "timestamp");
     
     if (Firebase.RTDB.push(&fbdo, logPath, &json)) {
         Serial.println("[FB] ✅ Parcel event logged: " + event);
