@@ -144,6 +144,10 @@ void setupEspNowReceiver();
 void onEspNowReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len);
 void processEspNowQR();
 
+// Firebase command callbacks
+void onLockCommandFromFirebase(int lockNum, bool open);
+void onEmergencyFromFirebase();
+
 // Utility
 void generateDeviceId();
 void checkSystemHealth();
@@ -224,10 +228,13 @@ void setup() {
     displayLCD("Initializing", "Communications", "", "");
     
     // Initialize unified communication (Firebase + ESP-NOW)
-    // Camera MAC address should be configured in ESPNOW_CONFIG.h
-    uint8_t cameraMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // Broadcast for now, update with actual MAC
+    uint8_t cameraMac[] = {CAM_MAC_0, CAM_MAC_1, CAM_MAC_2, CAM_MAC_3, CAM_MAC_4, CAM_MAC_5};
     comms.begin(system_state.device_id.c_str(), cameraMac);
     comms.setup();
+
+    // Register Firebase command stream callbacks for hardware control
+    comms.getFirebaseManager()->setLockCommandCallback(onLockCommandFromFirebase);
+    comms.getFirebaseManager()->setEmergencyCallback(onEmergencyFromFirebase);
     
     system_state.firebase_connected = comms.getFirebaseManager()->isReady();
     Serial.println("[SETUP 7/7] Communication result: " + String(system_state.firebase_connected ? "CONNECTED" : "FAILED")); Serial.flush();
@@ -1132,6 +1139,29 @@ void resetSystem() {
 
   closeLocksAfterDelivery();
   displayLCD("SYSTEM RESET", "Ready for next parcel", "", "");
+}
+
+// ============================================================================
+// FIREBASE COMMAND CALLBACKS
+// ============================================================================
+void onLockCommandFromFirebase(int lockNum, bool open) {
+  if (open) {
+    openLock(lockNum);
+    displayLCD("Remote: Lock " + String(lockNum), "Opening...", "", "");
+    if (system_state.firebase_connected) {
+      firebaseManager.logParcelEvent(system_state.device_id, "remote", "REMOTE_LOCK_" + String(lockNum) + "_OPEN");
+    }
+  } else {
+    closeLock(lockNum);
+    displayLCD("Remote: Lock " + String(lockNum), "Closing...", "", "");
+    if (system_state.firebase_connected) {
+      firebaseManager.logParcelEvent(system_state.device_id, "remote", "REMOTE_LOCK_" + String(lockNum) + "_CLOSE");
+    }
+  }
+}
+
+void onEmergencyFromFirebase() {
+  emergencyLockdown();
 }
 
 // ============================================================================

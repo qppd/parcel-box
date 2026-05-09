@@ -10,17 +10,25 @@
 class FirebaseManager;
 extern FirebaseManager* globalFirebaseManager;
 
+// Callback types for hardware control from Firebase commands
+typedef void (*LockCommandCallback)(int lockNum, bool open);
+typedef void (*EmergencyCallback)();
+
 class FirebaseManager {
 public:
     FirebaseManager();
-    
+
     // Initialization
     void begin();
     void setDeviceId(const String& id);
-    
+
     // Stream management
     void initializeStreams();
     void handleStreams();
+
+    // Hardware control callback registration
+    void setLockCommandCallback(LockCommandCallback cb);
+    void setEmergencyCallback(EmergencyCallback cb);
     
     // Data writing
     void updateDeviceStatus(const String& deviceId, bool wifiConnected, bool fbConnected, float temperature, int humidity);
@@ -52,6 +60,10 @@ private:
     // Internal methods
     void initializeCommandStream();
     
+    // Registered hardware callbacks
+    LockCommandCallback lockCommandCb = nullptr;
+    EmergencyCallback emergencyCb = nullptr;
+
     // Callback functions (static for C-style callback compatibility)
     static void commandStreamCallback(MultiPathStream stream);
     static void commandStreamTimeoutCallback(bool timeout);

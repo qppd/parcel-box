@@ -49,12 +49,22 @@ void FirebaseManager::begin() {
     
     if (Firebase.ready()) {
         Serial.println("[FB] ✅ Firebase CONNECTED!");
-        
+
         // Initialize streams for real-time communication
         initializeStreams();
     } else {
         Serial.println("[FB] ❌ Firebase FAILED - check credentials and network");
     }
+}
+
+void FirebaseManager::setLockCommandCallback(LockCommandCallback cb) {
+    lockCommandCb = cb;
+    Serial.println("[FB] Lock command callback registered");
+}
+
+void FirebaseManager::setEmergencyCallback(EmergencyCallback cb) {
+    emergencyCb = cb;
+    Serial.println("[FB] Emergency callback registered");
 }
 
 void FirebaseManager::initializeStreams() {
@@ -182,39 +192,44 @@ void FirebaseManager::commandStreamCallback(MultiPathStream stream) {
     Serial.println("\n🔥 🔥 🔥 COMMAND STREAM UPDATE RECEIVED! 🔥 🔥 🔥");
     Serial.println("Path: " + stream.dataPath);
     Serial.println("Value: " + stream.value);
-    
+
     // Handle lock control commands from app
     if (stream.get("/lock1")) {
         String command = stream.value;
         command.replace("\"", "");  // Remove JSON quotes
         Serial.println("🔓 Lock1 command: " + command);
-        // Process lock1 control - integrate with hardware control
-        // Example: if (command == "open") { /* open lock1 */ }
+        if (globalFirebaseManager->lockCommandCb) {
+            globalFirebaseManager->lockCommandCb(1, command == "open");
+        }
     }
-    
+
     // Handle lock2 control
     if (stream.get("/lock2")) {
         String command = stream.value;
         command.replace("\"", "");
         Serial.println("🔓 Lock2 command: " + command);
-        // Process lock2 control
+        if (globalFirebaseManager->lockCommandCb) {
+            globalFirebaseManager->lockCommandCb(2, command == "open");
+        }
     }
-    
+
     // Handle door control
     if (stream.get("/door1")) {
         String command = stream.value;
         command.replace("\"", "");
         Serial.println("🚪 Door1 command: " + command);
-        // Process door1 control
+        // door control handled by hardware - reed switches auto-detect
     }
-    
+
     // Handle emergency unlock command
     if (stream.get("/emergency_unlock")) {
         bool emergencyUnlock = (stream.value == "true");
         Serial.println("🚨 Emergency unlock: " + String(emergencyUnlock ? "ENABLED" : "DISABLED"));
-        // Process emergency unlock
+        if (emergencyUnlock && globalFirebaseManager->emergencyCb) {
+            globalFirebaseManager->emergencyCb();
+        }
     }
-    
+
     // Handle configuration changes
     if (stream.get("/config")) {
         Serial.println("⚙️ Configuration update received");
