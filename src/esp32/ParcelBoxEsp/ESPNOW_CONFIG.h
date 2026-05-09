@@ -20,4 +20,14 @@ typedef struct {
 #define ESPNOW_MAX_PAYLOAD 32      // Maximum QR code length
 #define ESPNOW_CHANNEL_WIFI 0      // 0 = use current WiFi channel (auto-sync)
 
+// ============================================================================
+// CAMERA MAC ADDRESS
+// ============================================================================
+#define CAM_MAC_0 0xA0
+#define CAM_MAC_1 0xDD
+#define CAM_MAC_2 0x6C
+#define CAM_MAC_3 0xAF
+#define CAM_MAC_4 0x02
+#define CAM_MAC_5 0x5C
+
 #endif // ESPNOW_CONFIG_H

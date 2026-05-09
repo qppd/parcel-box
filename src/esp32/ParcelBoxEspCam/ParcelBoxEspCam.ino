@@ -23,7 +23,7 @@
 
 // Main ESP32 MAC Address (Receiver)
 // Get this by running: Serial.println(WiFi.macAddress()); on the main ESP32
-uint8_t receiverMac[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};  // <-- UPDATE THIS!
+uint8_t receiverMac[] = {0xB0, 0xCB, 0xD8, 0x03, 0xD6, 0xA4};  // Main ESP32 MAC (B0:CB:D8:03:D6:A4)
 
 // Built-in LED for visual feedback
 #define LED_PIN 33

@@ -386,16 +386,16 @@
 | 🔒 Security | Firebase Auth + ESP-NOW encryption |Update `LCD_I2C_ADDRESS` in `PINS_CONFIG.h` with found address
 | 🔒 Security | Firebase Auth + ESP-NOW encryption |
 | 🔒 Security | Firebase Auth + ESP-NOW encryption |### WiFi Manager Setup Portal
-| 🔒 Security | Firebase Auth + ESP-NOW encryption |ESP32 will create a captive portal during first boot:
+| 🔒 Security | Firebase Auth + ESP-NOW encryption |ESP32 will create a captive portal during first boot using the custom **WiFiManagerCustom** class:
 | 🔒 Security | Firebase Auth + ESP-NOW encryption |- **Access Point Name:** `ParcelBox_Setup`
 | 🔒 Security | Firebase Auth + ESP-NOW encryption |- **Password:** `password123`
-| 🔒 Security | Firebase Auth + ESP-NOW encryption |- **Address:** `192.168.4.1` (auto-opens in browser)
-| 🔒 Security | Firebase Auth + ESP-NOW encryption |- **Timeout:** 3 minutes (falls back to offline mode)
+| 🔒 Security | Firebase Auth + ESP-NOW encryption |- **Address:** `192.168.4.1` (auto‑opens in browser)
+| 🔒 Security | Firebase Auth + ESP-NOW encryption |- **Portal timeout:** default 180 seconds (3 minutes) – configurable via `WiFiManagerCustom::setConfigPortalTimeout()`
+| 🔒 Security | Firebase Auth + ESP-NOW encryption |- **Connection timeout:** default 30 seconds – configurable via `WiFiManagerCustom::setConnectTimeout()`
+| 🔒 Security | Firebase Auth + ESP-NOW encryption |- **Static AP IP:** `192.168.4.1` (gateway & subnet `255.255.255.0`)
+| 🔒 Security | Firebase Auth + ESP-NOW encryption |- **Custom UI:** Branded HTML/CSS styling applied automatically.
 | 🔒 Security | Firebase Auth + ESP-NOW encryption |
-| 🔒 Security | Firebase Auth + ESP-NOW encryption |To reset WiFi credentials:
-| 🔒 Security | Firebase Auth + ESP-NOW encryption |```cpp
-| 🔒 Security | Firebase Auth + ESP-NOW encryption |// Call emergencyLockdown() via hardware button or special command
-| 🔒 Security | Firebase Auth + ESP-NOW encryption |// Or restart and power on to 2.4GHz WiFi
+| 🔒 Security | Firebase Auth + ESP-NOW encryption |**Credential reset** – call `WiFiManagerCustom::reset()` (e.g., via a hardware button) to clear stored Wi‑Fi settings and restart the captive portal.
 | 🔒 Security | Firebase Auth + ESP-NOW encryption |```
 | 🔒 Security | Firebase Auth + ESP-NOW encryption |
 | 🔒 Security | Firebase Auth + ESP-NOW encryption |### SIM800L Setup (Arduino)
