@@ -2,8 +2,6 @@
 #define FIREBASE_MANAGER_H
 
 #include <Firebase_ESP_Client.h>
-#include <addons/TokenHelper.h>
-#include <addons/RTDBHelper.h>
 #include "FirebaseConfig.h"
 
 // Forward declaration

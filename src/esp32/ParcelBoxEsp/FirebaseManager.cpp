@@ -1,4 +1,6 @@
 #include "FirebaseManager.h"
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
 
 // Global instance pointer for callback access
 FirebaseManager* globalFirebaseManager = nullptr;

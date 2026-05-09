@@ -6,8 +6,7 @@
 
 // Firebase library
 #include <Firebase_ESP_Client.h>
-// TokenHelper not needed — using legacy_token (Database Secret) auth
-#include <addons/RTDBHelper.h>
+// TokenHelper/RTDBHelper included via FirebaseManager.h
 
 // Custom configuration modules
 #include "PINS_CONFIG.h"
