@@ -15,26 +15,30 @@
 #include <Arduino.h>
 #include <ESP32QRCodeReader.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include "WiFiManagerCustom.h"
 
 // ============================================================================
-// CONFIGURATION - UPDATE THESE BEFORE DEPLOYMENT
+// CONFIGURATION
 // ============================================================================
 
 // Main ESP32 MAC Address (Receiver)
-// Get this by running: Serial.println(WiFi.macAddress()); on the main ESP32
-uint8_t receiverMac[] = {0xB0, 0xCB, 0xD8, 0x03, 0xD6, 0xA4};  // Main ESP32 MAC (B0:CB:D8:03:D6:A4)
+uint8_t receiverMac[] = {0xB0, 0xCB, 0xD8, 0x03, 0xD6, 0xA4};  // B0:CB:D8:03:D6:A4
 
 // Built-in LED for visual feedback
 #define LED_PIN 33
 
+// WiFi channel lock — MUST match Main ESP32's WiFi channel
+// Find main ESP32 channel with: Serial.println(WiFi.channel());
+#define ESPNOW_FIXED_CHANNEL 1  // Set this to your main ESP32's WiFi channel
+
 // ============================================================================
-// ESP-NOW DATA STRUCTURE
+// ESP-NOW QR PACKET STRUCTURE — MUST match ESPNOW_CONFIG.h on Main ESP32
 // ============================================================================
 typedef struct __attribute__((packed)) {
-    char qrData[32];        // QR code payload (parcelId)
-    uint32_t timestamp;     // Scan timestamp (millis)
-    uint8_t camMac[6];      // ESP32-CAM MAC address
+  char qrData[32];        // QR payload (parcelId)
+  uint32_t timestamp;     // Scan timestamp (millis)
+  uint8_t camMac[6];      // ESP32-CAM MAC address
 } ESPNOW_QRPacket_t;
 
 // ============================================================================
@@ -48,6 +52,18 @@ WiFiManagerCustom wifiManager;
 unsigned long lastScanTime = 0;
 const unsigned long SCAN_COOLDOWN_MS = 3000;  // 3 second debounce
 char lastQrSent[32] = "";
+
+// Last scan result from QR reader (persisted across task calls)
+String lastQrPayload = "";
+unsigned long lastInvalidPrint = 0;
+const unsigned long INVALID_PRINT_COOLDOWN = 5000;  // Only print [QR] Invalid once per 5s
+
+// ESP-NOW peer handle
+esp_now_peer_info_t peerInfo;
+
+// ACK tracking — the Main ESP32 can send back an EspNowMessage ACK
+// For simplicity, we use send callback as ACK confirmation
+bool lastSendSucceeded = true;
 
 // ============================================================================
 // FUNCTION DECLARATIONS
@@ -70,71 +86,75 @@ void setup()
     Serial.begin(115200);
     Serial.println();
     Serial.println("========================================");
-    Serial.println("ParcelBox ESP32-CAM QR Scanner");
+    Serial.println("ParcelBox ESP32-CAM QR Scanner v2.0");
     Serial.println("========================================");
 
     // Initialize LED
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
 
-    // Check PSRAM availability (critical for camera)
+    // Check PSRAM
     if (psramFound()) {
-        Serial.printf("[SETUP] PSRAM found: %d bytes\n", ESP.getPsramSize());
+        Serial.printf("[SETUP] PSRAM: %d bytes\n", ESP.getPsramSize());
     } else {
-        Serial.println("[SETUP] WARNING: No PSRAM found! Camera will not work.");
-        Serial.println("[SETUP] Enable PSRAM in Tools -> Board Settings -> PSRAM -> Enabled");
+        Serial.println("[SETUP] WARNING: No PSRAM! Camera will not work.");
+        Serial.println("[SETUP] Enable PSRAM in Tools -> Board Settings");
     }
 
     // Initialize QR Code Reader
-    Serial.println("[SETUP] Initializing camera...");
+    Serial.println(F("[SETUP] Initializing camera..."));
     if (reader.setup()) {
-        Serial.println("[SETUP] Camera initialized OK");
+        Serial.println(F("[SETUP] Camera OK"));
     } else {
-        Serial.println("[SETUP] ERROR: Camera init FAILED - check connections");
+        Serial.println(F("[SETUP] ERROR: Camera init FAILED"));
     }
 
-    // Start QR detection on Core 1
     reader.beginOnCore(1);
-    Serial.println("[SETUP] QR reader started on Core 1");
+    Serial.println(F("[SETUP] QR reader on Core 1"));
 
-    // Connect to WiFi using WiFiManager (captive portal for credentials)
-    Serial.println("[SETUP] Starting WiFi Manager for ESP-NOW...");
+    // Connect to WiFi
+    Serial.println(F("[SETUP] Starting WiFi..."));
     if (wifiManager.begin("ParcelBoxCam_Setup", "password123")) {
-        Serial.println("[SETUP] WiFi connected, channel: " + String(WiFi.channel()));
+        Serial.print("[SETUP] WiFi OK, ch: ");
+        Serial.println(WiFi.channel());
     } else {
-        Serial.println("[SETUP] WiFi FAILED - ESP-NOW may not work");
+        Serial.println(F("[SETUP] WiFi FAILED"));
     }
 
     // Initialize ESP-NOW
-    Serial.println("[SETUP] Initializing ESP-NOW...");
+    Serial.println(F("[SETUP] Initializing ESP-NOW..."));
     setupEspNow();
 
     // Success indication
     blinkLed(3, 100);
-    Serial.println("[SETUP] Ready - scanning for QR codes");
+    Serial.println(F("[SETUP] Ready - scanning for QR codes"));
     Serial.print("[SETUP] MAC: ");
     Serial.println(WiFi.macAddress());
     Serial.println("========================================");
 
     // Start QR processing task
-    xTaskCreate(onQrCodeTask, "onQrCode", 4 * 1024, NULL, 4, NULL);
+    xTaskCreate(onQrCodeTask, "onQrCode", 6 * 1024, NULL, 4, NULL);
 }
 
 // ============================================================================
-// LOOP (minimal - heavy lifting in task)
+// LOOP (non-blocking)
 // ============================================================================
 void loop()
 {
-    // Maintain WiFi connection (reconnects if dropped)
+    // Maintain WiFi connection — reconnects when dropped
     wifiManager.reconnect();
 
-    delay(5000);
-    // Print heartbeat
+    // Print heartbeat every 60s
     static unsigned long lastHeartbeat = 0;
-    if (millis() - lastHeartbeat > 30000) {
+    if (millis() - lastHeartbeat > 60000) {
         lastHeartbeat = millis();
-        Serial.println("[HEARTBEAT] UP " + String(millis() / 1000) + "s");
+        Serial.print("[HEARTBEAT] UP ");
+        Serial.print(millis() / 1000);
+        Serial.println("s");
     }
+
+    // No delay! WiFi handling and task scheduler run freely.
+    delay(10);  // Small yield for watchdog
 }
 
 // ============================================================================
@@ -142,28 +162,47 @@ void loop()
 // ============================================================================
 void setupEspNow()
 {
+    // Deinit first (safe for reinit)
+    esp_now_deinit();
+
+    WiFi.mode(WIFI_STA);
+
+    // CRITICAL: Lock WiFi channel to match Main ESP32
+    // ESP-NOW only works when both devices are on the same channel
+    wifi_promiscuous_filter_t filter = { .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL };
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(ESPNOW_FIXED_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+
+    Serial.printf("[ESPNOW] Forced to channel %d\n", ESPNOW_FIXED_CHANNEL);
+
     if (esp_now_init() != ESP_OK) {
-        Serial.println("[ESPNOW] ERROR: Init failed");
+        Serial.println(F("[ESPNOW] Init FAILED"));
         return;
     }
 
     // Register send callback
     esp_now_register_send_cb(onEspNowSent);
 
-    // Add peer (main ESP32)
-    esp_now_peer_info_t peerInfo;
+    // Register receive callback (for potential ACKs from main ESP32)
+    // esp_now_register_recv_cb(onEspNowReceived);  // Uncomment if ACK handling needed
+
+    // Add peer — Main ESP32
     memset(&peerInfo, 0, sizeof(peerInfo));
     memcpy(peerInfo.peer_addr, receiverMac, 6);
-    peerInfo.channel = 0;           // Use current channel (must match main ESP32)
-    peerInfo.encrypt = false;       // No encryption for simplicity
+    peerInfo.channel = 0;  // 0 = use current (locked) channel
+    peerInfo.encrypt = false;
     peerInfo.ifidx = WIFI_IF_STA;
 
     if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-        Serial.println("[ESPNOW] ERROR: Failed to add peer");
+        Serial.println(F("[ESPNOW] Peer add FAILED"));
         return;
     }
 
-    Serial.println("[ESPNOW] Peer added (Main ESP32)");
+    Serial.print(F("[ESPNOW] Peer added (Main ESP32)"));
+    Serial.printf(" %02X:%02X:%02X:%02X:%02X:%02X\n",
+        receiverMac[0], receiverMac[1], receiverMac[2],
+        receiverMac[3], receiverMac[4], receiverMac[5]);
 }
 
 // ============================================================================
@@ -175,13 +214,18 @@ void onEspNowSent(const wifi_tx_info_t *wifi_tx_info, esp_now_send_status_t stat
 void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 #endif
 {
-    Serial.print("[ESPNOW] Send status: ");
-    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "SUCCESS" : "FAIL");
-
-    // Visual feedback: 1 blink = success, 3 slow blinks = fail
     if (status == ESP_NOW_SEND_SUCCESS) {
+        if (!lastSendSucceeded) {
+            // Only print on state change from fail to success
+            Serial.println(F("[ESPNOW] ACK RECEIVED"));
+            lastSendSucceeded = true;
+        }
         blinkLed(1, 100);
     } else {
+        if (lastSendSucceeded) {
+            Serial.println(F("[ESPNOW] Send FAILED"));
+            lastSendSucceeded = false;
+        }
         blinkLed(3, 300);
     }
 }
@@ -191,14 +235,13 @@ void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 // ============================================================================
 void sendQrCode(const char* qrPayload)
 {
-    // Layer 1: Duplicate scan protection (CAM side)
+    // Layer 1: Duplicate scan (CAM side)
     if (strcmp(qrPayload, lastQrSent) == 0 &&
         (millis() - lastScanTime) < SCAN_COOLDOWN_MS) {
-        Serial.println("[DEBOUNCE] Skipping duplicate scan");
-        return;
+        return;  // Silent — don't print debounce noise
     }
 
-    // Update debounce tracking
+    // Update debounce
     strncpy(lastQrSent, qrPayload, 31);
     lastQrSent[31] = '\0';
     lastScanTime = millis();
@@ -209,6 +252,10 @@ void sendQrCode(const char* qrPayload)
     qrClean.replace("\r", "");
     qrClean.replace("\n", "");
 
+    if (qrClean.length() == 0) {
+        return;  // Don't send empty QR
+    }
+
     // Prepare packet
     memset(&packet, 0, sizeof(packet));
     strncpy(packet.qrData, qrClean.c_str(), 31);
@@ -216,30 +263,21 @@ void sendQrCode(const char* qrPayload)
     packet.timestamp = millis();
     WiFi.macAddress(packet.camMac);
 
-    Serial.println("========================================");
-    Serial.print("[QR] Detected: ");
+    // Clean output
+    Serial.print("[QR] Payload: ");
     Serial.println(packet.qrData);
-    Serial.print("[ESPNOW] Sending to: ");
-
-    // Print MAC address
-    for (int i = 0; i < 6; i++) {
-        if (i > 0) Serial.print(":");
-        Serial.printf("%02X", receiverMac[i]);
-    }
-    Serial.println();
 
     // Pre-send LED
     digitalWrite(LED_PIN, HIGH);
-    delay(50);
 
     // Send via ESP-NOW
     esp_err_t result = esp_now_send(receiverMac, (uint8_t *)&packet, sizeof(packet));
 
     digitalWrite(LED_PIN, LOW);
 
-    Serial.print("[ESPNOW] Result: ");
-    Serial.println(result == ESP_OK ? "OK" : "ERROR");
-    Serial.println("========================================");
+    if (result != ESP_OK) {
+        Serial.println(F("[ESPNOW] Send queue FAILED"));
+    }
 }
 
 // ============================================================================
@@ -248,17 +286,40 @@ void sendQrCode(const char* qrPayload)
 void onQrCodeTask(void *pvParameters)
 {
     struct QRCodeData qrCodeData;
+    unsigned long cooldownUntil = 0;
 
     while (true) {
         if (reader.receiveQrCode(&qrCodeData, 100)) {
-            Serial.println("[QR] Found QRCode");
             if (qrCodeData.valid) {
                 const char* payload = (const char *)qrCodeData.payload;
-                Serial.print("[QR] Payload: ");
-                Serial.println(payload);
+                String payloadStr = String(payload);
+                payloadStr.trim();
+
+                // Minimal validation — skip empty/trash reads
+                if (payloadStr.length() < 3) {
+                    // Too short to be valid — silently ignore
+                    // Print only once per 5s to avoid flooding
+                    if (millis() - lastInvalidPrint > INVALID_PRINT_COOLDOWN) {
+                        Serial.println(F("[QR] Invalid QR code data"));
+                        lastInvalidPrint = millis();
+                    }
+                    vTaskDelay(100 / portTICK_PERIOD_MS);
+                    continue;
+                }
+
+                // Check cooldown to avoid re-scanning the same QR too fast
+                if (millis() < cooldownUntil) {
+                    vTaskDelay(100 / portTICK_PERIOD_MS);
+                    continue;
+                }
+
                 sendQrCode(payload);
+                cooldownUntil = millis() + 2000;  // 2s min cooldown between sends
             } else {
-                Serial.println("[QR] Invalid QR code data");
+                if (millis() - lastInvalidPrint > INVALID_PRINT_COOLDOWN) {
+                    Serial.println(F("[QR] Invalid QR code data"));
+                    lastInvalidPrint = millis();
+                }
             }
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);

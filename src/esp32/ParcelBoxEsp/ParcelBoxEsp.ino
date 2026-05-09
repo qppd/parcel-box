@@ -6,7 +6,8 @@
 
 // Firebase library
 #include <Firebase_ESP_Client.h>
-// TokenHelper/RTDBHelper included via FirebaseManager.h
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
 
 // Custom configuration modules
 #include "PINS_CONFIG.h"
@@ -65,40 +66,58 @@ struct SystemState {
 // FIREBASE CONNECTION STATE
 // ============================================================================
 bool firebaseInitialized = false;
+bool firebaseStreamReady = false;  // Tracks that streams were started
 
 // ============================================================================
-// ESP-NOW WIRELESS COMMUNICATION
+// ESP-NOW — SINGLE MANAGER
 // ============================================================================
-// ESP32-CAM sends QR codes via ESP-NOW - Main ESP32 receives them
-volatile bool espNowQrAvailable = false;  // Flag set by ESP-NOW callback
-ESPNOW_QRPacket_t espNowPacket;           // Received QR data from ESP32-CAM
+// Single callback-based ESP-NOW. No EspNowManager conflicts.
+volatile bool espNowQrAvailable = false;
+ESPNOW_QRPacket_t espNowPacket;
+esp_now_peer_info_t camPeerInfo;
 
-// Duplicate scan protection (Layer 2 - main ESP32 side)
-static String lastProcessedEpsNowQR = "";
+// Duplicate scan protection
+static String lastProcessedEspNowQR = "";
 static unsigned long lastEspNowProcessTime = 0;
 
+// Firebase singleton objects (global for callback access)
+FirebaseData fbdo;
+FirebaseData commandStream;
+FirebaseAuth auth;
+FirebaseConfig fbConfig;
+
+// Stream state
+bool commandStreamActive = false;
+
 // ============================================================================
-// SERIAL MONITOR FLAGS (toggled via test commands)
+// SERIAL MONITOR FLAGS
 // ============================================================================
-bool reed1_monitor = false;        // Continuous reed switch 1 printing
-bool reed2_monitor = false;        // Continuous reed switch 2 printing
-bool qr_monitor = false;           // Print raw QR scanner data to Serial
-bool gsm_monitor = false;          // Forward all GSM responses to Serial
-unsigned long gsmRespTimeout = 0;  // End time for AT command response window
+bool reed1_monitor = false;
+bool reed2_monitor = false;
+bool qr_monitor = false;
+bool gsm_monitor = false;
+unsigned long gsmRespTimeout = 0;
 unsigned long lastReedPrint = 0;
 
 // ============================================================================
 // TIMING INTERVALS
 // ============================================================================
-const unsigned long FIREBASE_UPDATE_INTERVAL = 5000;      // 5 seconds
-const unsigned long HEALTH_CHECK_INTERVAL = 30000;        // 30 seconds
-const unsigned long RECONNECT_CHECK_INTERVAL = 10000;     // 10 seconds
-const unsigned long QR_SCAN_TIMEOUT = 30000;              // 30 seconds
+const unsigned long FIREBASE_UPDATE_INTERVAL = 5000;       // 5 seconds
+const unsigned long HEALTH_CHECK_INTERVAL = 30000;          // 30 seconds
+const unsigned long RECONNECT_CHECK_INTERVAL = 10000;       // 10 seconds
+const unsigned long QR_SCAN_TIMEOUT = 30000;                // 30 seconds
 
-// State tracking for intervals
 unsigned long lastFirebaseUpdate = 0;
 unsigned long lastHealthCheck = 0;
 unsigned long lastReconnectCheck = 0;
+
+// ============================================================================
+// STATE TRACKING FOR DIRTY-CHECK (prevents redundant Firebase writes)
+// ============================================================================
+bool prev_lock1 = false;
+bool prev_lock2 = false;
+bool prev_door1 = false;
+bool prev_door2 = false;
 
 // ============================================================================
 // FUNCTION DECLARATIONS
@@ -106,17 +125,14 @@ unsigned long lastReconnectCheck = 0;
 void setup();
 void loop();
 
-// WiFi & Firebase
 void setupWiFi();
 void initializeNTP();
 void checkWiFiConnection();
 void reconnectWiFi();
 
-// LCD
 void setupI2C_LCD();
 void displayLCD(String line1, String line2 = "", String line3 = "", String line4 = "");
 
-// Hardware Control
 void openLock(int lockNum);
 void closeLock(int lockNum);
 void playBuzzer(String tone_type);
@@ -126,7 +142,6 @@ void initSIM800L();
 void resetSIM800L();
 void sendSMS(String phone, String message);
 
-// QR & Parcel Workflow
 void processGSM();
 void handleParcelScanned(String qr_code);
 void validateAndOpenLocks(String qr_code);
@@ -134,20 +149,32 @@ void closeLocksAfterDelivery();
 void emergencyLockdown();
 void resetSystem();
 
-// Serial Testing
 void processSerialCommands();
 void printHelp();
 
-// ESP-NOW
-void setupEspNowReceiver();
+// ESP-NOW — SINGLE PATH
+void setupEspNow();
+void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status);
 void onEspNowReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len);
 void processEspNowQR();
+void syncEspNowChannel();
 
-// Firebase command callbacks
+// Firebase — SINGLE PATH
+void initializeFirebase();
+void registerDeviceInFirebase();
+void updateFirebaseStatus();
+void logParcelHistory(String parcel_id, String event);
+
+// Firebase stream callbacks (static)
+void commandStreamCallback(MultiPathStream stream);
+void commandStreamTimeoutCallback(bool timeout);
+void initCommandStream();
+void handleFirebaseStream();
+
+// Lock command callbacks
 void onLockCommandFromFirebase(int lockNum, bool open);
 void onEmergencyFromFirebase();
 
-// Utility
 void generateDeviceId();
 void checkSystemHealth();
 void debugPrint(String msg);
@@ -156,20 +183,16 @@ void debugPrint(String msg);
 // SETUP FUNCTION
 // ============================================================================
 void setup() {
-  // Initialize USB Serial for debug + test commands
   Serial.begin(BAUD_SERIAL);
-  Serial.setTimeout(50);   // Short timeout — readStringUntil() returns within 50ms
+  Serial.setTimeout(50);
   delay(500);
 
-  debugPrint("================================================");
-  debugPrint("Smart Parcel Locker - ESP32 Startup");
-  debugPrint("================================================");
+  Serial.println(F("================================================\n"
+                   "Smart Parcel Locker - ESP32 Startup\n"
+                   "================================================"));
 
   // ── Step 1: GPIO ──────────────────────────────────────────────────────────
-  Serial.println("[SETUP 1/7] Initializing GPIO pins..."); Serial.flush();
-  //pinMode(RELAY_1_PIN, OUTPUT);
-  //pinMode(RELAY_2_PIN, OUTPUT);
-  //pinMode(BUZZER_PIN, OUTPUT);
+  Serial.println(F("[SETUP 1/7] Initializing GPIO pins..."));
   pinMode(DOOR_SENSOR_1_PIN, INPUT_PULLUP);
   pinMode(DOOR_SENSOR_2_PIN, INPUT_PULLUP);
   pinMode(SIM800L_RST_PIN, OUTPUT);
@@ -177,73 +200,56 @@ void setup() {
   digitalWrite(RELAY_2_PIN, HIGH);
   digitalWrite(SIM800L_RST_PIN, HIGH);
   ledcAttach(BUZZER_PIN, 1000, BUZZER_RESOLUTION);
-  Serial.println("[SETUP 1/7] GPIO OK"); Serial.flush();
+  Serial.println(F("[SETUP 1/7] GPIO OK"));
 
   // ── Step 2: UARTs ─────────────────────────────────────────────────────────
-  Serial.println("[SETUP 2/7] Initializing UARTs..."); Serial.flush();
-  Serial.println("[SETUP 2/7]   SIM800L  -> UART2 RX=16 TX=17 @9600"); Serial.flush();
+  Serial.println(F("[SETUP 2/7] Initializing UARTs..."));
   sim800l.begin(BAUD_SIM800L, SERIAL_8N1, SIM800L_RX_PIN, SIM800L_TX_PIN);
   sim800l.setTimeout(50);
-  // ── Step 2: UARTs ─────────────────────────────────────────────────────────
-  Serial.println("[SETUP 2/7]   SIM800L  -> UART2 RX=16 TX=17 @9600"); Serial.flush();
-  sim800l.begin(BAUD_SIM800L, SERIAL_8N1, SIM800L_RX_PIN, SIM800L_TX_PIN);
-  sim800l.setTimeout(50);
-  Serial.println("[SETUP 2/7]   SIM800L  -> UART2 RX=16 TX=17 @9600"); Serial.flush();
-  Serial.println("[SETUP 2/7] UARTs OK"); Serial.flush();
   qrScanner.setTimeout(100);
-  Serial.println("[SETUP 2/7] UARTs OK"); Serial.flush();
+  Serial.println(F("[SETUP 2/7] UARTs OK"));
 
-  // ── Step 3: I2C + LCD ─────────────────────────────────────────────────────
-  Serial.println("[SETUP 3/7] Initializing I2C + LCD (addr=0x27)..."); Serial.flush();
+  // ── Step 3: I2C + LCD ────────────────────────────────────────────────────
+  Serial.println(F("[SETUP 3/7] Initializing I2C + LCD..."));
   Wire.begin(LCD_SDA_PIN, LCD_SCL_PIN);
   setupI2C_LCD();
   displayLCD("PARCEL LOCKER", "Initializing...", "v2.0 (ESP32)", "");
   delay(1000);
-  Serial.println("[SETUP 3/7] LCD OK"); Serial.flush();
+  Serial.println(F("[SETUP 3/7] LCD OK"));
 
-  // ── Step 4: Device ID ─────────────────────────────────────────────────────
-  Serial.println("[SETUP 4/7] Generating Device ID..."); Serial.flush();
+  // ── Step 4: Device ID ────────────────────────────────────────────────────
+  Serial.println(F("[SETUP 4/7] Generating Device ID..."));
   generateDeviceId();
-  Serial.println("[SETUP 4/7] Device ID: " + system_state.device_id); Serial.flush();
+  Serial.println("[SETUP 4/7] Device ID: " + system_state.device_id);
 
-  // ── Step 5: SIM800L ───────────────────────────────────────────────────────
-  Serial.println("[SETUP 5/7] Initializing SIM800L (takes ~5 sec)..."); Serial.flush();
+  // ── Step 5: SIM800L ──────────────────────────────────────────────────────
+  Serial.println(F("[SETUP 5/7] Initializing SIM800L..."));
   initSIM800L();
-  Serial.println("[SETUP 5/7] SIM800L OK"); Serial.flush();
+  Serial.println(F("[SETUP 5/7] SIM800L OK"));
   playBuzzer("startup");
 
-  // ── Step 6: WiFi ──────────────────────────────────────────────────────────
-  Serial.println("[SETUP 6/7] Starting WiFi..."); Serial.flush();
-  Serial.println("[SETUP 6/7]   If no saved WiFi: join 'ParcelBox_Setup' (pw: password123)"); Serial.flush();
-  Serial.println("[SETUP 6/7]   Then open browser -> 192.168.4.1 to configure."); Serial.flush();
-  Serial.println("[SETUP 6/7]   Auto-timeout in 180 sec if no action."); Serial.flush();
+  // ── Step 6: WiFi ─────────────────────────────────────────────────────────
+  Serial.println(F("[SETUP 6/7] Starting WiFi..."));
   displayLCD("Setting up WiFi", "Join: ParcelBox", "_Setup or wait...", "pw: password123");
   setupWiFi();
-  Serial.println("[SETUP 6/7] WiFi result: " + String(system_state.wifi_connected ? "CONNECTED" : "OFFLINE")); Serial.flush();
+  Serial.println("[SETUP 6/7] WiFi result: " + String(system_state.wifi_connected ? "CONNECTED" : "OFFLINE"));
 
-  // ── Step 7: Firebase + ESP-NOW ──────────────────────────────────────────
+  // ── Step 7: ESP-NOW + Firebase ──────────────────────────────────────────
   if (system_state.wifi_connected) {
-    Serial.println("[SETUP 7/7] Initializing Communication System..."); Serial.flush();
+    Serial.println(F("[SETUP 7/7] Initializing Communication System..."));
     displayLCD("Initializing", "Communications", "", "");
-    
-    // Initialize unified communication (Firebase + ESP-NOW)
-    uint8_t cameraMac[] = {CAM_MAC_0, CAM_MAC_1, CAM_MAC_2, CAM_MAC_3, CAM_MAC_4, CAM_MAC_5};
-    comms.begin(system_state.device_id.c_str(), cameraMac);
-    comms.setup();
 
-    // Register Firebase command stream callbacks for hardware control
-    comms.getFirebaseManager()->setLockCommandCallback(onLockCommandFromFirebase);
-    comms.getFirebaseManager()->setEmergencyCallback(onEmergencyFromFirebase);
-    
-    system_state.firebase_connected = comms.getFirebaseManager()->isReady();
-    firebaseInitialized = system_state.firebase_connected;
-    Serial.println("[SETUP 7/7] Communication result: " + String(system_state.firebase_connected ? "CONNECTED" : "FAILED")); Serial.flush();
+    // STEP 7a: ESP-NOW first (needs WiFi in STA mode)
+    setupEspNow();
+
+    // STEP 7b: Firebase second
+    initializeFirebase();
+
+    Serial.println("[SETUP 7/7] Communication result: " +
+      String(firebaseInitialized ? "CONNECTED" : "FAILED"));
   } else {
-    Serial.println("[SETUP 7/7] Communication SKIPPED (no WiFi)"); Serial.flush();
+    Serial.println(F("[SETUP 7/7] Communication SKIPPED (no WiFi)"));
   }
-
-  // ── Step 8: ESP-NOW Receiver ──────────────────────────────────────────────
-  setupEspNowReceiver();
 
   // ── Ready ─────────────────────────────────────────────────────────────────
   displayLCD("SYSTEM READY", "Waiting for parcel",
@@ -256,341 +262,197 @@ void setup() {
   Serial.println("  WiFi: " + String(system_state.wifi_connected ? "Connected" : "Offline"));
   Serial.println("  FB:   " + String(system_state.firebase_connected ? "Connected" : "Offline"));
   Serial.println("============================================");
-  Serial.flush();
 }
 
 // ============================================================================
 // MAIN LOOP
 // ============================================================================
 void loop() {
-  // Process serial test commands from USB
   processSerialCommands();
-
-  // Check WiFi connection and maintain it
   checkWiFiConnection();
 
-  // Update Firebase connection state
-  if (system_state.wifi_connected && firebaseInitialized) {
-    system_state.firebase_connected = Firebase.ready();
-  } else {
-    system_state.firebase_connected = false;
-  }
-
-  // PRIORITY 1: Process ESP-NOW QR from ESP32-CAM
+  // ESP-NOW QR from ESP32-CAM (highest priority)
   processEspNowQR();
 
-  // Process GSM responses (non-blocking)
+  // Process GSM responses
   processGSM();
 
-  // Monitor door sensors (reed switches)
+  // Monitor door sensors
   checkDoorSensors();
 
-  // Continuous reed switch monitoring output
+  // Continuous reed switch monitoring output (only when enabled)
   if (reed1_monitor || reed2_monitor) {
     if (millis() - lastReedPrint >= 500) {
       lastReedPrint = millis();
       if (reed1_monitor) {
-        bool s = digitalRead(DOOR_SENSOR_1_PIN) == HIGH;
-        Serial.println("[REED-1] " + String(s ? "OPEN" : "CLOSED"));
-        Serial.flush();
+        Serial.println("[REED-1] " + String(digitalRead(DOOR_SENSOR_1_PIN) == HIGH ? "OPEN" : "CLOSED"));
       }
       if (reed2_monitor) {
-        bool s = digitalRead(DOOR_SENSOR_2_PIN) == HIGH;
-        Serial.println("[REED-2] " + String(s ? "OPEN" : "CLOSED"));
-        Serial.flush();
+        Serial.println("[REED-2] " + String(digitalRead(DOOR_SENSOR_2_PIN) == HIGH ? "OPEN" : "CLOSED"));
       }
     }
   }
 
-  // Handle all communications (Firebase streams + ESP-NOW)
+  // ── Firebase: handle streaming command channel ──────────────────────────
   if (system_state.firebase_connected) {
-    comms.handle();
-    
-    // Update lock status
-    auto fbMgr = comms.getFirebaseManager();
-    fbMgr->updateLockStatus(
-      system_state.device_id,
-      system_state.lock1_open,
-      system_state.lock2_open,
-      system_state.door1_open,
-      system_state.door2_open
-    );
+    handleFirebaseStream();
   }
 
-  // System health check
-  if (millis() - lastHealthCheck > HEALTH_CHECK_INTERVAL) {
-    lastHealthCheck = millis();
-    checkSystemHealth();
+  // ── Firebase: update lock status (THROTTLED + DIRTY-CHECKED) ────────────
+  if (system_state.firebase_connected && firebaseInitialized) {
+    system_state.firebase_connected = Firebase.ready();
+    if (system_state.firebase_connected) {
+      bool lock1 = system_state.lock1_open;
+      bool lock2 = system_state.lock2_open;
+      bool door1 = system_state.door1_open;
+      bool door2 = system_state.door2_open;
+
+      // Only write to Firebase when state actually changes
+      if (lock1 != prev_lock1 || lock2 != prev_lock2 ||
+          door1 != prev_door1 || door2 != prev_door2) {
+        updateFirebaseStatus();
+        prev_lock1 = lock1;
+        prev_lock2 = lock2;
+        prev_door1 = door1;
+        prev_door2 = door2;
+      }
+
+      // Periodic heartbeat (every 30s)
+      if (millis() - lastHealthCheck > HEALTH_CHECK_INTERVAL) {
+        lastHealthCheck = millis();
+        if (firebaseInitialized && Firebase.ready()) {
+          String devPath = ParcelBoxFirebaseConfig::getDeviceStatusPath();
+          Firebase.RTDB.setInt(&fbdo, (devPath + "/" + system_state.device_id + "/last_heartbeat").c_str(), millis());
+        }
+        checkSystemHealth();
+      }
+    }
   }
 
-  delay(50);
+  delay(10);  // Reduced from 50ms — watchdog-friendly, better responsiveness
 }
 
 // ============================================================================
-// SERIAL COMMAND TESTING SYSTEM
+// SERIAL COMMAND PROCESSING
 // ============================================================================
-/*
- * Non-blocking: readStringUntil('\n') is called ONLY when Serial.available().
- * With Serial.setTimeout(50), it returns within 50ms max — never blocks loop.
- * Works with ANY Serial Monitor line-ending setting (NL, CR, or Both).
- *
- * Commands:
- *   relay-1:on / relay-1:off      Control lock relay 1
- *   relay-2:on / relay-2:off      Control lock relay 2
- *   buzzer:on  / buzzer:off       Buzzer control
- *   lcd:test                      LCD test display
- *   reed-1:read                   Single reed switch 1 read
- *   reed-1:mon:on / reed-1:mon:off  Continuous reed-1 monitor
- *   reed-2:read
- *   reed-2:mon:on / reed-2:mon:off
- *   qr:mon:on / qr:mon:off        Print raw QR scanner data
- *   gsm:<AT_CMD>                  Send AT command (e.g. gsm:AT+CSQ)
- *   gsm:mon:on / gsm:mon:off      Live GSM response monitor
- *   status                        System health check
- *   help                          Show this help
- */
 void processSerialCommands() {
-  // ------------------------------------------------------------------
-  // Pattern identical to the sample:
-  //   if (Serial.available()) { readStringUntil('\n'); process; }
-  // Serial.setTimeout(50) keeps the 50ms worst-case latency.
-  // .trim() removes the trailing '\r' so any line-ending setting works.
-  // ------------------------------------------------------------------
-  if (Serial.available()) {
-    String rawLine = Serial.readStringUntil('\n');
-    rawLine.trim();
-    if (rawLine.length() == 0) return;
+  if (!Serial.available()) return;
 
-    String cmd = rawLine;
-    cmd.toLowerCase();  // Case-insensitive matching
+  String rawLine = Serial.readStringUntil('\n');
+  rawLine.trim();
+  if (rawLine.length() == 0) return;
 
-    Serial.print("[Serial] Received: "); Serial.println(rawLine); Serial.flush();
+  String cmd = rawLine;
+  cmd.toLowerCase();
 
-    // --- Relay 1 ---
-    if (cmd == "relay-1:on") {
-      openLock(1);
-      Serial.println("[RELAY-1] ON"); Serial.flush();
-    }
-    else if (cmd == "relay-1:off") {
-      closeLock(1);
-      Serial.println("[RELAY-1] OFF"); Serial.flush();
-    }
-    // --- Relay 2 ---
-    else if (cmd == "relay-2:on") {
-      openLock(2);
-      Serial.println("[RELAY-2] ON"); Serial.flush();
-    }
-    else if (cmd == "relay-2:off") {
-      closeLock(2);
-      Serial.println("[RELAY-2] OFF"); Serial.flush();
-    }
-    // --- Buzzer ---
-    else if (cmd == "buzzer:on") {
-      ledcWriteTone(BUZZER_PIN, 1000);
-      Serial.println("[BUZZER] ON (1kHz continuous)"); Serial.flush();
-    }
-    else if (cmd == "buzzer:off") {
-      ledcWriteTone(BUZZER_PIN, 0);
-      Serial.println("[BUZZER] OFF"); Serial.flush();
-    }
-    // --- LCD ---
-    else if (cmd == "lcd:test") {
-      displayLCD("LCD TEST", "Line 2 OK", "Line 3 OK", "Line 4 OK");
-      Serial.println("[LCD] Test pattern displayed"); Serial.flush();
-    }
-    // --- Reed Switch 1 ---
-    else if (cmd == "reed-1:read") {
-      bool s = digitalRead(DOOR_SENSOR_1_PIN) == HIGH;
-      Serial.println("[REED-1] " + String(s ? "OPEN" : "CLOSED")); Serial.flush();
-    }
-    else if (cmd == "reed-1:mon:on") {
-      reed1_monitor = true;
-      Serial.println("[REED-1] Monitor ON (every 500ms)"); Serial.flush();
-    }
-    else if (cmd == "reed-1:mon:off") {
-      reed1_monitor = false;
-      Serial.println("[REED-1] Monitor OFF"); Serial.flush();
-    }
-    // --- Reed Switch 2 ---
-    else if (cmd == "reed-2:read") {
-      bool s = digitalRead(DOOR_SENSOR_2_PIN) == HIGH;
-      Serial.println("[REED-2] " + String(s ? "OPEN" : "CLOSED")); Serial.flush();
-    }
-    else if (cmd == "reed-2:mon:on") {
-      reed2_monitor = true;
-      Serial.println("[REED-2] Monitor ON (every 500ms)"); Serial.flush();
-    }
-    else if (cmd == "reed-2:mon:off") {
-      reed2_monitor = false;
-      Serial.println("[REED-2] Monitor OFF"); Serial.flush();
-    }
-    // --- QR Scanner Monitor ---
-    else if (cmd == "qr:mon:on") {
-      qr_monitor = true;
-      Serial.println("[QR] Monitor ON"); Serial.flush();
-    }
-    else if (cmd == "qr:mon:off") {
-      qr_monitor = false;
-      Serial.println("[QR] Monitor OFF"); Serial.flush();
-    }
-    // --- GSM Monitor ---
-    else if (cmd == "gsm:mon:on") {
-      gsm_monitor = true;
-      Serial.println("[GSM] Monitor ON - live responses forwarded"); Serial.flush();
-    }
-    else if (cmd == "gsm:mon:off") {
-      gsm_monitor = false;
-      Serial.println("[GSM] Monitor OFF"); Serial.flush();
-    }
-    // --- GSM AT command: forward to SIM800L (must be AFTER gsm:mon: checks) ---
-    else if (cmd.startsWith("gsm:")) {
-      String atCmd = rawLine.substring(4);  // preserve casing for AT commands
-      atCmd.trim();
-      Serial.print("[GSM] Sending: "); Serial.println(atCmd); Serial.flush();
-      sim800l.println(atCmd);              // send to UART2 (GPIO16 RX / GPIO17 TX)
-      gsmRespTimeout = millis() + 2000;    // show responses for next 2s
-    }
-    // --- Status ---
-    else if (cmd == "status") {
-      checkSystemHealth();
-    }
-    // --- Help ---
-    else if (cmd == "help") {
-      printHelp();
-    }
-    else {
-      Serial.println("[ERR] Unknown: '" + cmd + "' | Type help");
-      Serial.flush();
-    }
+  Serial.print("[Serial] Cmd: "); Serial.println(rawLine);
 
-  }  // end if (Serial.available())
+  if (cmd == "relay-1:on") { openLock(1); Serial.println(F("[RELAY-1] ON")); }
+  else if (cmd == "relay-1:off") { closeLock(1); Serial.println(F("[RELAY-1] OFF")); }
+  else if (cmd == "relay-2:on") { openLock(2); Serial.println(F("[RELAY-2] ON")); }
+  else if (cmd == "relay-2:off") { closeLock(2); Serial.println(F("[RELAY-2] OFF")); }
+  else if (cmd == "buzzer:on") { ledcWriteTone(BUZZER_PIN, 1000); Serial.println(F("[BUZZER] ON")); }
+  else if (cmd == "buzzer:off") { ledcWriteTone(BUZZER_PIN, 0); Serial.println(F("[BUZZER] OFF")); }
+  else if (cmd == "lcd:test") { displayLCD("LCD TEST", "Line 2 OK", "Line 3 OK", "Line 4 OK"); }
+  else if (cmd == "reed-1:read") { Serial.println("[REED-1] " + String(digitalRead(DOOR_SENSOR_1_PIN) == HIGH ? "OPEN" : "CLOSED")); }
+  else if (cmd == "reed-1:mon:on") { reed1_monitor = true; Serial.println(F("[REED-1] Monitor ON")); }
+  else if (cmd == "reed-1:mon:off") { reed1_monitor = false; Serial.println(F("[REED-1] Monitor OFF")); }
+  else if (cmd == "reed-2:read") { Serial.println("[REED-2] " + String(digitalRead(DOOR_SENSOR_2_PIN) == HIGH ? "OPEN" : "CLOSED")); }
+  else if (cmd == "reed-2:mon:on") { reed2_monitor = true; Serial.println(F("[REED-2] Monitor ON")); }
+  else if (cmd == "reed-2:mon:off") { reed2_monitor = false; Serial.println(F("[REED-2] Monitor OFF")); }
+  else if (cmd == "qr:mon:on") { qr_monitor = true; Serial.println(F("[QR] Monitor ON")); }
+  else if (cmd == "qr:mon:off") { qr_monitor = false; Serial.println(F("[QR] Monitor OFF")); }
+  else if (cmd == "gsm:mon:on") { gsm_monitor = true; Serial.println(F("[GSM] Monitor ON")); }
+  else if (cmd == "gsm:mon:off") { gsm_monitor = false; Serial.println(F("[GSM] Monitor OFF")); }
+  else if (cmd.startsWith("gsm:")) {
+    String atCmd = rawLine.substring(4);
+    atCmd.trim();
+    Serial.print("[GSM] Sending: "); Serial.println(atCmd);
+    sim800l.println(atCmd);
+    gsmRespTimeout = millis() + 2000;
+  }
+  else if (cmd == "status") { checkSystemHealth(); }
+  else if (cmd == "help") { printHelp(); }
+  else { Serial.println("[ERR] Unknown: '" + cmd + "' | Type help"); }
 }
 
 void printHelp() {
-  Serial.println();
-  Serial.println("======= PARCEL LOCKER COMMANDS =======");
-  Serial.println("relay-1:on          Open relay 1 (lock 1)");
-  Serial.println("relay-1:off         Close relay 1 (lock 1)");
-  Serial.println("relay-2:on          Open relay 2 (lock 2)");
-  Serial.println("relay-2:off         Close relay 2 (lock 2)");
-  Serial.println("buzzer:on           Buzzer continuous 1kHz ON");
-  Serial.println("buzzer:off          Buzzer OFF");
-  Serial.println("lcd:test            Display test text on LCD");
-  Serial.println("reed-1:read         Single read of reed switch 1");
-  Serial.println("reed-1:mon:on       Start continuous reed-1 monitor");
-  Serial.println("reed-1:mon:off      Stop continuous reed-1 monitor");
-  Serial.println("reed-2:read         Single read of reed switch 2");
-  Serial.println("reed-2:mon:on       Start continuous reed-2 monitor");
-  Serial.println("reed-2:mon:off      Stop continuous reed-2 monitor");
-  Serial.println("qr:mon:on           Print raw QR scanner data");
-  Serial.println("qr:mon:off          Stop printing QR data");
-  Serial.println("gsm:<AT CMD>        Send AT command to SIM800L");
-  Serial.println("                    e.g.  gsm:AT   gsm:AT+CSQ");
-  Serial.println("gsm:mon:on          Forward all live GSM responses");
-  Serial.println("gsm:mon:off         Stop live GSM forwarding");
-  Serial.println("status              System health check");
-  Serial.println("help                Show this help");
-  Serial.println("======================================");
-  Serial.println("TIP: Line ending: Newline, CR, or Both NL & CR");
-  Serial.println();
-  Serial.flush();
+  Serial.println(F("======= PARCEL LOCKER COMMANDS ======="
+                   "\nrelay-1:on/off         Control lock 1"
+                   "\nrelay-2:on/off         Control lock 2"
+                   "\nbuzzer:on/off          Buzzer control"
+                   "\nlcd:test               LCD test display"
+                   "\nreed-1:read            Read reed switch 1"
+                   "\nreed-1:mon:on/off      Continuous reed-1 monitor"
+                   "\nreed-2:read            Read reed switch 2"
+                   "\nreed-2:mon:on/off      Continuous reed-2 monitor"
+                   "\nqr:mon:on/off          Print raw QR scanner data"
+                   "\ngsm:<AT CMD>           Send AT command to SIM800L"
+                   "\ngsm:mon:on/off         Forward GSM responses"
+                   "\nstatus                 System health check"
+                   "\nhelp                   Show this help"
+                   "\n======================================"));
 }
 
 // ============================================================================
-// LOCK CONTROL (Direct Relay GPIO)
+// LOCK CONTROL
 // ============================================================================
-/*
- * Relay Module Logic (Active-LOW):
- * - GPIO LOW  = Relay ACTIVE   = Solenoid energized (lock opens)
- * - GPIO HIGH = Relay INACTIVE = Solenoid de-energized (lock closed)
- */
 void openLock(int lockNum) {
   int pin = (lockNum == 1) ? RELAY_1_PIN : RELAY_2_PIN;
-  digitalWrite(pin, LOW);  // Relay active → lock opens
-
+  digitalWrite(pin, LOW);
   if (lockNum == 1) system_state.lock1_open = true;
   else system_state.lock2_open = true;
-
   debugPrint("Lock " + String(lockNum) + " OPENED");
   playBuzzer("click");
 }
 
 void closeLock(int lockNum) {
   int pin = (lockNum == 1) ? RELAY_1_PIN : RELAY_2_PIN;
-  digitalWrite(pin, HIGH);  // Relay inactive → lock closed
-
+  digitalWrite(pin, HIGH);
   if (lockNum == 1) system_state.lock1_open = false;
   else system_state.lock2_open = false;
-
   debugPrint("Lock " + String(lockNum) + " CLOSED");
 }
 
 // ============================================================================
-// BUZZER CONTROL (ESP32 LEDC PWM)
+// BUZZER
 // ============================================================================
 void playBuzzer(String tone_type) {
   if (tone_type == "startup") {
-    // Startup: 2 short beeps
-    for (int i = 0; i < 2; i++) {
-      ledcWriteTone(BUZZER_PIN, 1000);
-      delay(100);
-      ledcWriteTone(BUZZER_PIN, 0);
-      delay(50);
-    }
+    for (int i = 0; i < 2; i++) { ledcWriteTone(BUZZER_PIN, 1000); delay(100); ledcWriteTone(BUZZER_PIN, 0); delay(50); }
+  } else if (tone_type == "success") {
+    for (int freq = 800; freq < 2000; freq += 50) { ledcWriteTone(BUZZER_PIN, freq); delay(20); }
+  } else if (tone_type == "alert") {
+    for (int i = 0; i < 5; i++) { ledcWriteTone(BUZZER_PIN, 2000); delay(50); ledcWriteTone(BUZZER_PIN, 0); delay(50); }
+  } else if (tone_type == "click") {
+    ledcWriteTone(BUZZER_PIN, 1500); delay(50);
   }
-  else if (tone_type == "success") {
-    // Success: ascending chirp
-    for (int freq = 800; freq < 2000; freq += 50) {
-      ledcWriteTone(BUZZER_PIN, freq);
-      delay(20);
-    }
-  }
-  else if (tone_type == "alert") {
-    // Alert: rapid beeping
-    for (int i = 0; i < 5; i++) {
-      ledcWriteTone(BUZZER_PIN, 2000);
-      delay(50);
-      ledcWriteTone(BUZZER_PIN, 0);
-      delay(50);
-    }
-  }
-  else if (tone_type == "click") {
-    // Click: single short beep
-    ledcWriteTone(BUZZER_PIN, 1500);
-    delay(50);
-  }
-
-  ledcWriteTone(BUZZER_PIN, 0);  // Ensure buzzer is off
+  ledcWriteTone(BUZZER_PIN, 0);
 }
 
 // ============================================================================
-// DOOR SENSOR MONITORING (Reed Switches - Direct GPIO)
+// DOOR SENSORS
 // ============================================================================
 void checkDoorSensors() {
-  // Read sensors (LOW = closed/magnet near, HIGH = open/no magnet)
-  bool new_door1 = digitalRead(DOOR_SENSOR_1_PIN) == HIGH;
-  bool new_door2 = digitalRead(DOOR_SENSOR_2_PIN) == HIGH;
+  bool nd1 = digitalRead(DOOR_SENSOR_1_PIN) == HIGH;
+  bool nd2 = digitalRead(DOOR_SENSOR_2_PIN) == HIGH;
 
-  // Detect state changes - door 1
-  if (new_door1 != system_state.door1_open) {
-    system_state.door1_open = new_door1;
+  if (nd1 != system_state.door1_open) {
+    system_state.door1_open = nd1;
     if (system_state.door1_open) {
       debugPrint("Parcel door OPENED");
     } else {
       debugPrint("Parcel door CLOSED");
-      Serial.println("EVENT:DOOR1_CLOSED");
       handleDoorClosed(1);
     }
   }
 
-  // Detect state changes - door 2
-  if (new_door2 != system_state.door2_open) {
-    system_state.door2_open = new_door2;
+  if (nd2 != system_state.door2_open) {
+    system_state.door2_open = nd2;
     if (system_state.door2_open) {
       debugPrint("Payment box door OPENED");
     } else {
       debugPrint("Payment box door CLOSED");
-      Serial.println("EVENT:DOOR2_CLOSED");
       handleDoorClosed(2);
     }
   }
@@ -599,168 +461,123 @@ void checkDoorSensors() {
 void handleDoorClosed(int doorNum) {
   if (doorNum == 1) {
     system_state.lock1_open = false;
-
     debugPrint("Parcel door closed - marking as delivered");
     displayLCD("Parcel Locked", "Delivery complete", "", "");
 
-    // Log delivery event
     if (system_state.firebase_connected && system_state.current_parcel_id.length() > 0) {
-      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, system_state.current_parcel_id, "PARCEL_DELIVERED");
+      logParcelHistory(system_state.current_parcel_id, "PARCEL_DELIVERED");
     }
 
     delay(2000);
     displayLCD("READY", "Scan parcel QR",
                "WiFi: " + String(system_state.wifi_connected ? "OK" : "---"),
                "FB: " + String(system_state.firebase_connected ? "OK" : "---"));
-
-    // Reset for next parcel
     system_state.current_parcel_id = "";
     system_state.current_qr_code = "";
-  }
-  else if (doorNum == 2) {
+  } else if (doorNum == 2) {
     system_state.lock2_open = false;
     debugPrint("Payment box closed");
   }
 }
 
 // ============================================================================
-// SIM800L GSM FUNCTIONS (HardwareSerial UART2)
+// SIM800L GSM
 // ============================================================================
 void initSIM800L() {
-  Serial.print("[SIM800L] Resetting"); Serial.flush();
+  Serial.print(F("[SIM800L] Resetting"));
   digitalWrite(SIM800L_RST_PIN, LOW);
   delay(100);
   digitalWrite(SIM800L_RST_PIN, HIGH);
+  for (int i = 0; i < 8; i++) { delay(500); Serial.print("."); }
+  Serial.println(F(" boot done"));
 
-  // Boot wait — print a dot every 500ms so Serial Monitor shows progress
-  for (int i = 0; i < 8; i++) {
-    delay(500);
-    Serial.print("."); Serial.flush();
-  }
-  Serial.println(" boot done"); Serial.flush();
-
-  // Send AT to verify
-  Serial.print("[SIM800L] Sending AT ... "); Serial.flush();
+  Serial.print(F("[SIM800L] AT... "));
   sim800l.println("AT");
   delay(500);
-
-  // Print any response
   if (sim800l.available()) {
-    String resp = sim800l.readStringUntil('\n');
-    resp.trim();
-    Serial.println("response: " + resp); Serial.flush();
+    Serial.println("response: " + sim800l.readStringUntil('\n'));
   } else {
-    Serial.println("no response (check wiring/power)"); Serial.flush();
+    Serial.println(F("no response (check wiring/power)"));
   }
-
-  // Drain any remaining bytes
   while (sim800l.available()) sim800l.read();
 }
 
 void resetSIM800L() {
-  Serial.print("[SIM800L] Hardware reset"); Serial.flush();
-  digitalWrite(SIM800L_RST_PIN, LOW);
-  delay(100);
-  digitalWrite(SIM800L_RST_PIN, HIGH);
-  delay(1000);
-  Serial.println(" done"); Serial.flush();
+  Serial.print(F("[SIM800L] Hardware reset"));
+  digitalWrite(SIM800L_RST_PIN, LOW); delay(100);
+  digitalWrite(SIM800L_RST_PIN, HIGH); delay(1000);
+  Serial.println(F(" done"));
 }
 
 void sendSMS(String phone, String message) {
-  // Cooldown to prevent SMS spam
-  unsigned long current_time = millis();
-  if (current_time - system_state.last_sms_time < SMS_COOLDOWN) {
-    debugPrint("SMS cooldown active, skipping send");
+  if (millis() - system_state.last_sms_time < SMS_COOLDOWN) {
+    debugPrint("SMS cooldown active");
     return;
   }
-
   debugPrint("Sending SMS to: " + phone);
-  debugPrint("Message: " + message);
-
-  // SIM800L AT Command sequence
-  sim800l.println("AT+CMGF=1");  // Set text mode
-  delay(100);
-
-  sim800l.print("AT+CMGS=\"");
-  sim800l.print(phone);
-  sim800l.println("\"");
-  delay(100);
-
+  sim800l.println("AT+CMGF=1"); delay(100);
+  sim800l.print("AT+CMGS=\""); sim800l.print(phone); sim800l.println("\""); delay(100);
   sim800l.print(message);
-  sim800l.write(26);  // Ctrl+Z to send
+  sim800l.write(26);
   delay(1000);
-
-  system_state.last_sms_time = current_time;
-
+  system_state.last_sms_time = millis();
   debugPrint("SMS sent!");
   playBuzzer("click");
 }
 
 // ============================================================================
-// WIFI SETUP AND MANAGEMENT
+// WIFI
 // ============================================================================
 void setupWiFi() {
   debugPrint("Initializing WiFi Manager...");
-
-  // Begin WiFi setup with captive portal
   if (!wifiManager.begin("ParcelBox_Setup", "password123")) {
-    debugPrint("WiFi setup timeout - using previous credentials or offline mode");
+    debugPrint("WiFi setup timeout");
     displayLCD("WiFi Timeout", "Will retry in", "offline mode", "");
     system_state.wifi_connected = false;
     return;
   }
-
   debugPrint("WiFi Connected!");
   debugPrint("IP Address: " + wifiManager.getLocalIP());
-
   displayLCD("WiFi Connected", "IP: " + wifiManager.getLocalIP(), "", "");
   system_state.wifi_connected = true;
   delay(2000);
-
-  // Initialize NTP for time synchronization
   initializeNTP();
 }
 
 void initializeNTP() {
-  debugPrint("Synchronizing time with NTP...");
-
+  debugPrint("Syncing time with NTP...");
   configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-
   time_t now = time(nullptr);
   int attempts = 0;
-  while (now < 24 * 3600 && attempts < 20) {
-    delay(500);
-    now = time(nullptr);
-    attempts++;
-  }
-
+  while (now < 24 * 3600 && attempts < 20) { delay(500); now = time(nullptr); attempts++; }
   struct tm timeinfo = *localtime(&now);
-  debugPrint("Time synchronized: " + String(asctime(&timeinfo)));
+  debugPrint("Time: " + String(asctime(&timeinfo)));
 }
 
 void checkWiFiConnection() {
-  unsigned long currentMillis = millis();
+  unsigned long now = millis();
+  if (now - lastReconnectCheck < RECONNECT_CHECK_INTERVAL) return;
+  lastReconnectCheck = now;
 
-  // Check connection status periodically
-  if (currentMillis - lastReconnectCheck > RECONNECT_CHECK_INTERVAL) {
-    lastReconnectCheck = currentMillis;
+  bool connected = wifiManager.isConnected();
 
-    bool connected = wifiManager.isConnected();
+  if (!connected && system_state.wifi_connected) {
+    debugPrint("WiFi connection lost!");
+    system_state.wifi_connected = false;
+    displayLCD("WiFi Disconnected", "Reconnecting...", "", "");
+  }
 
-    if (!connected && system_state.wifi_connected) {
-      debugPrint("WiFi connection lost!");
-      system_state.wifi_connected = false;
-      displayLCD("WiFi Disconnected", "Reconnecting...", "", "");
-    }
+  if (!connected) {
+    wifiManager.reconnect();
+  } else if (!system_state.wifi_connected) {
+    debugPrint("WiFi reconnected!");
 
-    if (!connected) {
-      wifiManager.reconnect();
-    } else if (!system_state.wifi_connected) {
-      debugPrint("WiFi reconnected!");
-      system_state.wifi_connected = true;
-      if (!firebaseInitialized) {
-        initializeFirebase();
-      }
+    // Re-init ESP-NOW after WiFi reconnect (WiFi channel may have changed)
+    setupEspNow();
+
+    system_state.wifi_connected = true;
+    if (!firebaseInitialized) {
+      initializeFirebase();
     }
   }
 }
@@ -772,7 +589,7 @@ void reconnectWiFi() {
 }
 
 // ============================================================================
-// I2C LCD SETUP AND DISPLAY
+// LCD
 // ============================================================================
 void setupI2C_LCD() {
   lcd.init();
@@ -783,67 +600,167 @@ void setupI2C_LCD() {
 
 void displayLCD(String line1, String line2, String line3, String line4) {
   lcd.clear();
-
-  if (line1.length() > 0) {
-    line1 = line1.substring(0, LCD_COLS);
-    lcd.setCursor(0, 0);
-    lcd.print(line1);
-  }
-
-  if (line2.length() > 0) {
-    line2 = line2.substring(0, LCD_COLS);
-    lcd.setCursor(0, 1);
-    lcd.print(line2);
-  }
-
-  if (line3.length() > 0) {
-    line3 = line3.substring(0, LCD_COLS);
-    lcd.setCursor(0, 2);
-    lcd.print(line3);
-  }
-
-  if (line4.length() > 0) {
-    line4 = line4.substring(0, LCD_COLS);
-    lcd.setCursor(0, 3);
-    lcd.print(line4);
-  }
+  if (line1.length() > 0) { lcd.setCursor(0, 0); lcd.print(line1.substring(0, LCD_COLS)); }
+  if (line2.length() > 0) { lcd.setCursor(0, 1); lcd.print(line2.substring(0, LCD_COLS)); }
+  if (line3.length() > 0) { lcd.setCursor(0, 2); lcd.print(line3.substring(0, LCD_COLS)); }
+  if (line4.length() > 0) { lcd.setCursor(0, 3); lcd.print(line4.substring(0, LCD_COLS)); }
 }
 
 // ============================================================================
-// FIREBASE INITIALIZATION AND SETUP
+// ESP-NOW — SINGLE INIT, SINGLE CALLBACK
 // ============================================================================
-void initializeFirebase() {
-  if (firebaseInitialized) {
+void setupEspNow() {
+  esp_err_t err;
+
+  // 1. Ensure WiFi is STA mode
+  WiFi.mode(WIFI_STA);
+
+  // 2. Deinit first if already initialized (safe for reinit after reconnect)
+  esp_now_deinit();
+
+  // 3. Init fresh
+  err = esp_now_init();
+  if (err != ESP_OK) {
+    Serial.printf("[ESPNOW] Init failed: %d\n", err);
     return;
   }
 
-  Serial.println("[FB] (Re)initializing Firebase..."); Serial.flush();
+  // 4. Register callbacks
+  esp_now_register_send_cb(onEspNowSent);
+  esp_now_register_recv_cb(onEspNowReceived);
 
-  auto fbMgr = comms.getFirebaseManager();
-  if (!fbMgr->isReady()) {
-    fbMgr->setDeviceId(system_state.device_id);
-    fbMgr->begin();
+  // 5. Add CAM as peer
+  memset(&camPeerInfo, 0, sizeof(camPeerInfo));
+  camPeerInfo.channel = 0;  // Will be locked via esp_wifi_set_channel()
+  camPeerInfo.encrypt = false;
+  camPeerInfo.ifidx = WIFI_IF_STA;
+  camPeerInfo.peer_addr[0] = CAM_MAC_0;
+  camPeerInfo.peer_addr[1] = CAM_MAC_1;
+  camPeerInfo.peer_addr[2] = CAM_MAC_2;
+  camPeerInfo.peer_addr[3] = CAM_MAC_3;
+  camPeerInfo.peer_addr[4] = CAM_MAC_4;
+  camPeerInfo.peer_addr[5] = CAM_MAC_5;
+
+  err = esp_now_add_peer(&camPeerInfo);
+  if (err != ESP_OK) {
+    Serial.printf("[ESPNOW] Peer add failed: %d\n", err);
   }
 
-  if (fbMgr->isReady()) {
-    Serial.println("[FB] Firebase CONNECTED!"); Serial.flush();
+  // 6. Channel sync — force ESP-NOW to WiFi channel
+  syncEspNowChannel();
+
+  Serial.printf("[ESPNOW] Ready. MAC: %s, Channel: %d\n",
+    WiFi.macAddress().c_str(), WiFi.channel());
+}
+
+void syncEspNowChannel() {
+  if (WiFi.status() == WL_CONNECTED) {
+    int ch = WiFi.channel();
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    // Log only on change (no flooding)
+    Serial.printf("[ESPNOW] Channel synced: %d\n", ch);
+  }
+}
+
+void onEspNowSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  // Only log failures to avoid flooding on ACKs
+  if (status != ESP_NOW_SEND_SUCCESS) {
+    Serial.println(F("[ESPNOW] Send FAILED"));
+  }
+}
+
+void onEspNowReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  // Verify packet size matches ESPNOW_QRPacket_t (42 bytes)
+  if (len != sizeof(ESPNOW_QRPacket_t)) {
+    // Silently discard mismatched packets — no serial spam
+    return;
+  }
+
+  memcpy(&espNowPacket, data, sizeof(ESPNOW_QRPacket_t));
+
+  // Sanitize QR data
+  espNowPacket.qrData[31] = '\0';
+  String qrClean = String(espNowPacket.qrData);
+  qrClean.trim();
+  qrClean.replace("\r", "");
+  qrClean.replace("\n", "");
+  strncpy(espNowPacket.qrData, qrClean.c_str(), 31);
+  espNowPacket.qrData[31] = '\0';
+
+  espNowQrAvailable = true;
+
+  // Single clean print when QR arrives
+  Serial.print(F("[QR RX] Received QR: "));
+  Serial.println(espNowPacket.qrData);
+}
+
+void processEspNowQR() {
+  if (!espNowQrAvailable) return;
+  espNowQrAvailable = false;
+
+  String qr_code = String(espNowPacket.qrData);
+
+  // Duplicate protection
+  if (qr_code == lastProcessedEspNowQR &&
+      (millis() - lastEspNowProcessTime) < ESPNOW_DUPLICATE_COOLDOWN) {
+    return;
+  }
+
+  lastProcessedEspNowQR = qr_code;
+  lastEspNowProcessTime = millis();
+
+  Serial.println("[ESPNOW] Processing QR: " + qr_code);
+  displayLCD("QR via CAM", qr_code, "Validating...", "");
+  handleParcelScanned(qr_code);
+}
+
+// ============================================================================
+// FIREBASE — SINGLE PATH
+// ============================================================================
+void initializeFirebase() {
+  if (firebaseInitialized) return;
+
+  Serial.println(F("[FB] Initializing..."));
+
+  // Configure
+  fbConfig.host = ParcelBoxFirebaseConfig::getFirebaseHost();
+  fbConfig.database_url = ParcelBoxFirebaseConfig::getDatabaseURL();
+  fbConfig.signer.tokens.legacy_token = ParcelBoxFirebaseConfig::getFirebaseAuth();
+  fbConfig.timeout.serverResponse = 10 * 1000;
+  fbConfig.timeout.rtdbStreamReconnect = 1 * 1000;
+  fbConfig.timeout.rtdbStreamError = 3 * 1000;
+
+  // Set buffer sizes
+  fbdo.setBSSLBufferSize(2048, 1024);
+  fbdo.setResponseSize(2048);
+  commandStream.setBSSLBufferSize(2048, 1024);
+  commandStream.setResponseSize(2048);
+
+  // Begin
+  Firebase.begin(&fbConfig, &auth);
+  Firebase.reconnectWiFi(true);
+
+  Serial.print(F("[FB] Awaiting connection"));
+  unsigned long start = millis();
+  while (!Firebase.ready() && millis() - start < 10000) {
+    Serial.print("."); delay(500);
+  }
+  Serial.println();
+
+  if (Firebase.ready()) {
+    Serial.println(F("[FB] ✅ Connected"));
     system_state.firebase_connected = true;
     firebaseInitialized = true;
     registerDeviceInFirebase();
+    initCommandStream();
   } else {
-    Serial.println("[FB] Firebase FAILED - check Database Secret and RTDB URL."); Serial.flush();
-    system_state.firebase_connected = false;
+    Serial.println(F("[FB] ❌ Connection FAILED"));
     firebaseInitialized = true;
   }
 }
 
 void registerDeviceInFirebase() {
-  String devicePath = ParcelBoxFirebaseConfig::getDeviceStatusPath();
-
-  comms.getFirebaseManager()->fbdo.setBSSLBufferSize(2048, 1024);
-  comms.getFirebaseManager()->fbdo.setResponseSize(2048);
-
-  // Create device status object
+  String path = String(ParcelBoxFirebaseConfig::getDeviceStatusPath()) + "/" + system_state.device_id;
   FirebaseJson json;
   json.set("device_id", system_state.device_id);
   json.set("model", "ParcelBox_ESP32");
@@ -852,275 +769,121 @@ void registerDeviceInFirebase() {
   json.set("firebase_connected", true);
   json.set("last_heartbeat", millis());
 
-  // Push to Firebase
-  if (Firebase.RTDB.setJSON(&comms.getFirebaseManager()->fbdo, devicePath.c_str(), &json)) {
+  if (Firebase.RTDB.setJSON(&fbdo, path.c_str(), &json)) {
     debugPrint("Device registered in Firebase");
   } else {
-    debugPrint("Failed to register device: " + String(comms.getFirebaseManager()->fbdo.errorReason()));
+    debugPrint("Register failed: " + String(fbdo.errorReason()));
   }
 }
 
-// ============================================================================
-// UPDATE FIREBASE STATUS
-// ============================================================================
 void updateFirebaseStatus() {
-  if (!system_state.firebase_connected) {
-    return;
+  if (!system_state.firebase_connected || !Firebase.ready()) return;
+
+  String path = String(ParcelBoxFirebaseConfig::getLocksStatusPath()) + "/" + system_state.device_id;
+  FirebaseJson json;
+  json.set("lock1", system_state.lock1_open ? "open" : "closed");
+  json.set("lock2", system_state.lock2_open ? "open" : "closed");
+  json.set("door1", system_state.door1_open ? "open" : "closed");
+  json.set("door2", system_state.door2_open ? "closed" : "open");
+  json.set("timestamp/.sv", "timestamp");
+
+  if (Firebase.RTDB.setJSON(&fbdo, path.c_str(), &json)) {
+    // Print only once per state change — no flooding
+    debugPrint("FB: Lock status updated");
+  } else {
+    debugPrint("FB update failed: " + String(fbdo.errorReason()));
   }
-
-  String devicePath = ParcelBoxFirebaseConfig::getDeviceStatusPath();
-
-  // Update device heartbeat
-  Firebase.RTDB.setInt(&comms.getFirebaseManager()->fbdo, (devicePath + "/last_heartbeat").c_str(), millis());
-
-  // Update lock status
-  String locksPath = ParcelBoxFirebaseConfig::getLocksStatusPath();
-
-  FirebaseJson locksJson;
-  locksJson.set("lock1/status", system_state.lock1_open ? "open" : "closed");
-  locksJson.set("lock1/last_update", millis());
-  locksJson.set("lock2/status", system_state.lock2_open ? "open" : "closed");
-  locksJson.set("lock2/last_update", millis());
-
-  Firebase.RTDB.setJSON(&comms.getFirebaseManager()->fbdo, locksPath.c_str(), &locksJson);
 }
 
-// ============================================================================
-// PARCEL HISTORY LOGGING
-// ============================================================================
 void logParcelHistory(String parcel_id, String event) {
-  if (!system_state.firebase_connected) {
-    debugPrint("Firebase not connected - skipping history log");
-    return;
-  }
+  if (!system_state.firebase_connected || !Firebase.ready()) return;
 
-  String historyPath = ParcelBoxFirebaseConfig::getHistoryPath();
-  unsigned long timestamp = millis();
+  String path = String(ParcelBoxFirebaseConfig::getHistoryPath()) + "/" + system_state.device_id;
+  FirebaseJson entry;
+  entry.set("parcel_id", parcel_id);
+  entry.set("event", event);
+  entry.set("timestamp/.sv", "timestamp");
+  entry.set("device_id", system_state.device_id);
 
-  FirebaseJson historyEntry;
-  historyEntry.set("parcel_id", parcel_id);
-  historyEntry.set("event", event);
-  historyEntry.set("timestamp", timestamp);
-  historyEntry.set("device_id", system_state.device_id);
-
-  // Push entry to history (creates new child with auto-ID)
-  if (Firebase.RTDB.pushJSON(&comms.getFirebaseManager()->fbdo, historyPath.c_str(), &historyEntry)) {
-    debugPrint("History logged: " + parcel_id + " -> " + event);
+  if (Firebase.RTDB.pushJSON(&fbdo, path.c_str(), &entry)) {
+    debugPrint("History: " + parcel_id + " -> " + event);
   } else {
-    debugPrint("Failed to log history: " + String(comms.getFirebaseManager()->fbdo.errorReason()));
+    debugPrint("History failed: " + String(fbdo.errorReason()));
   }
 }
 
 // ============================================================================
-// QR CODE SCANNER PROCESSING (UART1: GPIO33 RX / GPIO26 TX / GPIO25 RST)
+// FIREBASE STREAM — COMMAND CHANNEL
 // ============================================================================
-/*
- * Non-blocking: readStringUntil('\n') called ONLY when qrScanner.available().
- * With qrScanner.setTimeout(100), returns within 100ms even without newline.
- * Each call reads ONE complete QR code line per loop iteration.
- */
-void processQRScanner() {
-  // Same pattern as sample: check available() first, then readStringUntil.
-  // UART1 (GPIO33 RX / GPIO26 TX / GPIO25 RST) — does NOT interfere with GSM or Serial.
-  if (qrScanner.available()) {
-    String qr_code = qrScanner.readStringUntil('\n');
-    qr_code.trim();
+void initCommandStream() {
+  if (!firebaseInitialized || !Firebase.ready()) return;
 
-    if (qr_code.length() > 0) {
-      Serial.print("[QR] Received: "); Serial.println(qr_code); Serial.flush();
-      handleParcelScanned(qr_code);
-    }
-  }
-}
+  String cmdPath = String(ParcelBoxFirebaseConfig::getDeviceStatusPath()) +
+    "/" + system_state.device_id + "/commands";
 
-// ============================================================================
-// GSM RESPONSE PROCESSOR (UART2: GPIO16 RX / GPIO17 TX)
-// ============================================================================
-/*
- * Non-blocking: readStringUntil('\n') called ONLY when sim800l.available().
- * Prints GSM responses to Serial if:
- *   - gsm_monitor is ON (live monitoring), OR
- *   - gsmRespTimeout is active (2s window after sending an AT command).
- */
-void processGSM() {
-  // Same pattern as sample: check available() first, then readStringUntil.
-  // UART2 (GPIO16 RX / GPIO17 TX) — does NOT interfere with QR or Serial.
-  // Responses are printed when gsm_monitor is ON or within 2s of an AT command.
-  if (sim800l.available()) {
-    String line = sim800l.readStringUntil('\n');
-    line.trim();
+  Serial.println("[FB] Starting command stream: " + cmdPath);
 
-    if (line.length() > 0) {
-      if (gsm_monitor || millis() < gsmRespTimeout) {
-        Serial.print("[GSM] Received: "); Serial.println(line); Serial.flush();
-      }
-    }
-  }
-}
-
-// ============================================================================
-// PARCEL HANDLING WORKFLOW
-// ============================================================================
-void handleParcelScanned(String qr_code) {
-  system_state.current_qr_code = qr_code;
-  system_state.last_scan_time = millis();
-
-  // Display scanning feedback
-  displayLCD("QR SCANNED", qr_code, "Validating...", "");
-
-  // Log scan event
-  if (system_state.firebase_connected) {
-    comms.getFirebaseManager()->logParcelEvent(system_state.device_id, qr_code, "QR_SCANNED");
-  }
-
-  // Validate QR code with backend
-  validateAndOpenLocks(qr_code);
-}
-
-void validateAndOpenLocks(String qr_code) {
-  debugPrint("Validating QR: " + qr_code);
-
-  bool is_valid = false;
-
-  // Check Firebase for parcel information
-  if (system_state.firebase_connected) {
-    String parcelPath = String(ParcelBoxFirebaseConfig::getParcelsDatabasePath()) + "/" + qr_code;
-
-    if (Firebase.RTDB.getJSON(&comms.getFirebaseManager()->fbdo, parcelPath.c_str())) {
-      if (comms.getFirebaseManager()->fbdo.dataType() == "json") {
-        is_valid = true;
-        system_state.current_parcel_id = qr_code;
-
-        debugPrint("Parcel found in Firebase");
-        if (system_state.firebase_connected) {
-          comms.getFirebaseManager()->logParcelEvent(system_state.device_id, qr_code, "PARCEL_FOUND");
-        }
-      }
-    }
+  if (!Firebase.RTDB.beginMultiPathStream(&commandStream, cmdPath)) {
+    Serial.printf("[FB] Stream init failed: %s\n", commandStream.errorReason().c_str());
+    commandStreamActive = false;
   } else {
-    // Fallback: accept if QR is long enough for offline mode
-    if (qr_code.length() >= 5) {
-      is_valid = true;
-      system_state.current_parcel_id = qr_code;
-    }
-  }
-
-  if (is_valid) {
-    debugPrint("QR Validation: SUCCESS");
-    system_state.valid_scan = true;
-
-    displayLCD("Access Granted", "Opening locks...", "", "");
-    if (system_state.firebase_connected) {
-      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, qr_code, "VALIDATION_SUCCESS");
-    }
-
-    // Open parcel door (Lock #1)
-    openLock(1);
-    delay(LOCK_OPERATION_DELAY);
-
-    // Open payment box (Lock #2)
-    openLock(2);
-    delay(LOCK_OPERATION_DELAY);
-
-    // Success feedback
-    playBuzzer("success");
-    displayLCD("DOORS OPEN", "Place parcel in box", "Complete payment", "Door closes auto");
-
-  } else {
-    debugPrint("QR Validation: FAILED");
-    system_state.valid_scan = false;
-
-    // Access denied
-    playBuzzer("alert");
-    displayLCD("Access Denied", "Invalid QR Code", "Try again", "");
-
-    if (system_state.firebase_connected) {
-      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, qr_code, "VALIDATION_FAILED");
-    }
-    delay(3000);
-    displayLCD("READY", "Scan parcel QR",
-               "WiFi: " + String(system_state.wifi_connected ? "OK" : "---"),
-               "FB: " + String(system_state.firebase_connected ? "OK" : "---"));
+    Firebase.RTDB.setMultiPathStreamCallback(&commandStream, commandStreamCallback, commandStreamTimeoutCallback);
+    commandStreamActive = true;
+    Serial.println(F("[FB] ✅ Command stream active"));
   }
 }
 
-// ============================================================================
-// SYSTEM HEALTH CHECK
-// ============================================================================
-void checkSystemHealth() {
-  Serial.println();
-  Serial.println("=== System Health ===");
-  Serial.println("Uptime:    " + String(millis() / 1000) + "s");
-  Serial.println("WiFi:      " + String(system_state.wifi_connected ? "Connected" : "Disconnected"));
-  Serial.println("Firebase:  " + String(system_state.firebase_connected ? "Connected" : "Disconnected"));
-  Serial.println("Parcel ID: " + (system_state.current_parcel_id.length() > 0 ? system_state.current_parcel_id : "None"));
-  Serial.println("Lock 1:    " + String(system_state.lock1_open ? "OPEN" : "CLOSED"));
-  Serial.println("Lock 2:    " + String(system_state.lock2_open ? "OPEN" : "CLOSED"));
-  Serial.println("Door 1:    " + String(system_state.door1_open ? "OPEN" : "CLOSED"));
-  Serial.println("Door 2:    " + String(system_state.door2_open ? "OPEN" : "CLOSED"));
-  Serial.println("Reed-1 mon:" + String(reed1_monitor ? "ON" : "OFF"));
-  Serial.println("Reed-2 mon:" + String(reed2_monitor ? "ON" : "OFF"));
-  Serial.println("QR mon:    " + String(qr_monitor ? "ON" : "OFF"));
-  Serial.println("GSM mon:   " + String(gsm_monitor ? "ON" : "OFF"));
-  Serial.println("GSM pins:  RX=16 TX=17 | QR pins: RX=33 TX=26 RST=25");
-  Serial.println("=====================");
-  Serial.println();
-  Serial.flush();
-}
+void handleFirebaseStream() {
+  if (!commandStreamActive) return;
 
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
-void generateDeviceId() {
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
-
-  char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-
-  system_state.device_id = "PARCELBOX_" + String(macStr);
-}
-
-void debugPrint(String msg) {
-  Serial.print("[ESP32] ");
-  Serial.println(msg);
-  Serial.flush();
-}
-
-// ============================================================================
-// ADDITIONAL CONTROL FUNCTIONS
-// ============================================================================
-void closeLocksAfterDelivery() {
-  debugPrint("Closing locks after delivery...");
-  closeLock(1);
-  delay(LOCK_OPERATION_DELAY);
-  closeLock(2);
-}
-
-void emergencyLockdown() {
-  debugPrint("EMERGENCY LOCKDOWN ACTIVATED!");
-  displayLCD("LOCKDOWN", "System Secured", "Contact Admin", "");
-
-  closeLock(1);
-  delay(LOCK_OPERATION_DELAY);
-  closeLock(2);
-  playBuzzer("alert");
-
-  if (system_state.firebase_connected) {
-    comms.getFirebaseManager()->logParcelEvent(system_state.device_id, "SYSTEM", "EMERGENCY_LOCKDOWN");
+  if (!Firebase.RTDB.readStream(&commandStream)) {
+    int httpCode = commandStream.httpCode();
+    if (httpCode < 0 || httpCode == FIREBASE_ERROR_HTTP_CODE_OK) {
+      // stream data just not available yet — normal
+      return;
+    }
+    Serial.printf("[FB] Stream error: %s\n", commandStream.errorReason().c_str());
+    commandStreamActive = false;
+    // Reinit on next loop
+    initCommandStream();
   }
 }
 
-void resetSystem() {
-  system_state.current_parcel_id = "";
-  system_state.current_qr_code = "";
-  system_state.lock1_open = false;
-  system_state.lock2_open = false;
-  system_state.valid_scan = false;
+void commandStreamCallback(MultiPathStream stream) {
+  if (stream.get("/lock1")) {
+    String cmd = stream.value;
+    cmd.replace("\"", "");
+    if (cmd == "open" || cmd == "close") {
+      Serial.println("[FB] Lock1 cmd: " + cmd);
+      if (cmd == "open") { onLockCommandFromFirebase(1, true); }
+      else { onLockCommandFromFirebase(1, false); }
+    }
+  }
+  if (stream.get("/lock2")) {
+    String cmd = stream.value;
+    cmd.replace("\"", "");
+    if (cmd == "open" || cmd == "close") {
+      Serial.println("[FB] Lock2 cmd: " + cmd);
+      if (cmd == "open") { onLockCommandFromFirebase(2, true); }
+      else { onLockCommandFromFirebase(2, false); }
+    }
+  }
+  if (stream.get("/emergency_unlock")) {
+    if (stream.value == "true") {
+      Serial.println(F("[FB] Emergency unlock commanded"));
+      onEmergencyFromFirebase();
+    }
+  }
+}
 
-  closeLocksAfterDelivery();
-  displayLCD("SYSTEM RESET", "Ready for next parcel", "", "");
+void commandStreamTimeoutCallback(bool timeout) {
+  if (timeout) {
+    Serial.println(F("[FB] Stream timeout"));
+  }
+  if (!commandStream.httpConnected()) {
+    Serial.printf("[FB] Stream disconnected: %d\n", commandStream.httpCode());
+    commandStreamActive = false;
+  }
 }
 
 // ============================================================================
@@ -1130,15 +893,11 @@ void onLockCommandFromFirebase(int lockNum, bool open) {
   if (open) {
     openLock(lockNum);
     displayLCD("Remote: Lock " + String(lockNum), "Opening...", "", "");
-    if (system_state.firebase_connected) {
-      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, "remote", "REMOTE_LOCK_" + String(lockNum) + "_OPEN");
-    }
+    logParcelHistory("remote", "REMOTE_LOCK_" + String(lockNum) + "_OPEN");
   } else {
     closeLock(lockNum);
     displayLCD("Remote: Lock " + String(lockNum), "Closing...", "", "");
-    if (system_state.firebase_connected) {
-      comms.getFirebaseManager()->logParcelEvent(system_state.device_id, "remote", "REMOTE_LOCK_" + String(lockNum) + "_CLOSE");
-    }
+    logParcelHistory("remote", "REMOTE_LOCK_" + String(lockNum) + "_CLOSE");
   }
 }
 
@@ -1147,75 +906,130 @@ void onEmergencyFromFirebase() {
 }
 
 // ============================================================================
-// ESP-NOW RECEIVER FUNCTIONS
+// PARCEL QR WORKFLOW
 // ============================================================================
-void setupEspNowReceiver() {
-    // ESP-NOW requires WiFi to be in STA mode
-    WiFi.mode(WIFI_STA);
-
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("[ESPNOW] ERROR: Init failed");
-        return;
+void processGSM() {
+  if (sim800l.available()) {
+    String line = sim800l.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0 && (gsm_monitor || millis() < gsmRespTimeout)) {
+      Serial.print("[GSM] "); Serial.println(line);
     }
-
-    // Register receive callback
-    esp_now_register_recv_cb(onEspNowReceived);
-
-    // CRITICAL: Sync ESP-NOW channel with WiFi channel
-    if (WiFi.status() == WL_CONNECTED) {
-        int wifiChannel = WiFi.channel();
-        esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
-        Serial.println("[ESPNOW] Synced to WiFi channel: " + String(wifiChannel));
-    }
-
-    Serial.println("[ESPNOW] Receiver ready - awaiting ESP32-CAM scans");
+  }
 }
 
-void onEspNowReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-    if (len != sizeof(ESPNOW_QRPacket_t)) {
-        Serial.println("[ESPNOW] ERROR: Invalid packet size: " + String(len));
-        return;
-    }
+void handleParcelScanned(String qr_code) {
+  system_state.current_qr_code = qr_code;
+  system_state.last_scan_time = millis();
 
-    // Copy data to packet structure
-    memcpy(&espNowPacket, data, sizeof(ESPNOW_QRPacket_t));
+  displayLCD("QR SCANNED", qr_code, "Validating...", "");
 
-    // Sanitize: Ensure null termination
-    espNowPacket.qrData[31] = '\0';
+  if (system_state.firebase_connected) {
+    logParcelHistory(qr_code, "QR_SCANNED");
+  }
 
-    // Sanitize: Remove control characters
-    String qrClean = String(espNowPacket.qrData);
-    qrClean.trim();
-    qrClean.replace("\r", "");
-    qrClean.replace("\n", "");
-    strncpy(espNowPacket.qrData, qrClean.c_str(), 31);
-    espNowPacket.qrData[31] = '\0';
-
-    espNowQrAvailable = true;
-
-    Serial.print("[ESPNOW] QR from CAM: ");
-    Serial.println(espNowPacket.qrData);
+  validateAndOpenLocks(qr_code);
 }
 
-void processEspNowQR() {
-    if (!espNowQrAvailable) return;
-    espNowQrAvailable = false;
+void validateAndOpenLocks(String qr_code) {
+  debugPrint("Validating QR: " + qr_code);
 
-    String qr_code = String(espNowPacket.qrData);
+  bool is_valid = false;
 
-    // Layer 2: Duplicate scan protection (main ESP32 side)
-    if (qr_code == lastProcessedEpsNowQR &&
-        (millis() - lastEspNowProcessTime) < ESPNOW_DUPLICATE_COOLDOWN) {
-        Serial.println("[ESPNOW] Duplicate ignored: " + qr_code);
-        return;
+  if (system_state.firebase_connected && Firebase.ready()) {
+    String parcelPath = String(ParcelBoxFirebaseConfig::getParcelsDatabasePath()) + "/" + qr_code;
+    if (Firebase.RTDB.getJSON(&fbdo, parcelPath.c_str())) {
+      if (fbdo.dataType() == "json") {
+        is_valid = true;
+        system_state.current_parcel_id = qr_code;
+        debugPrint("Parcel found in Firebase");
+        logParcelHistory(qr_code, "PARCEL_FOUND");
+      }
     }
+  } else {
+    if (qr_code.length() >= 5) {
+      is_valid = true;
+      system_state.current_parcel_id = qr_code;
+    }
+  }
 
-    lastProcessedEpsNowQR = qr_code;
-    lastEspNowProcessTime = millis();
+  if (is_valid) {
+    debugPrint("QR Validation: SUCCESS");
+    system_state.valid_scan = true;
+    displayLCD("Access Granted", "Opening locks...", "", "");
+    logParcelHistory(qr_code, "VALIDATION_SUCCESS");
 
-    Serial.println("[ESPNOW] Processing: " + qr_code);
-    displayLCD("ESPNOW QR Received", qr_code, "Validating...", "");
+    openLock(1);
+    delay(LOCK_OPERATION_DELAY);
+    openLock(2);
+    delay(LOCK_OPERATION_DELAY);
 
-    // Process the QR code through normal flow
-    handleParcelScanned(qr_code);
+    playBuzzer("success");
+    displayLCD("DOORS OPEN", "Place parcel in box", "Complete payment", "Door closes auto");
+    Serial.println(F("[AUTH] Valid parcel - Locks opened"));
+  } else {
+    debugPrint("QR Validation: FAILED");
+    system_state.valid_scan = false;
+    playBuzzer("alert");
+    displayLCD("Access Denied", "Invalid QR Code", "Try again", "");
+    logParcelHistory(qr_code, "VALIDATION_FAILED");
+    delay(3000);
+    displayLCD("READY", "Scan parcel QR",
+               "WiFi: " + String(system_state.wifi_connected ? "OK" : "---"),
+               "FB: " + String(system_state.firebase_connected ? "OK" : "---"));
+  }
+}
+
+// ============================================================================
+// HEALTH
+// ============================================================================
+void checkSystemHealth() {
+  // Only print health if something changed
+  Serial.println(F("\n=== System Health ==="));
+  Serial.println("Uptime: " + String(millis() / 1000) + "s");
+  Serial.println("WiFi: " + String(system_state.wifi_connected ? "Connected" : "Disconnected"));
+  Serial.println("Firebase: " + String(system_state.firebase_connected ? "Connected" : "Disconnected"));
+  Serial.println("Lock 1: " + String(system_state.lock1_open ? "OPEN" : "CLOSED"));
+  Serial.println("Lock 2: " + String(system_state.lock2_open ? "OPEN" : "CLOSED"));
+  Serial.println("Door 1: " + String(system_state.door1_open ? "OPEN" : "CLOSED"));
+  Serial.println("Door 2: " + String(system_state.door2_open ? "OPEN" : "CLOSED"));
+  Serial.println("=====================\n");
+}
+
+void closeLocksAfterDelivery() {
+  debugPrint("Closing locks...");
+  closeLock(1); delay(LOCK_OPERATION_DELAY);
+  closeLock(2);
+}
+
+void emergencyLockdown() {
+  debugPrint("EMERGENCY LOCKDOWN!");
+  displayLCD("LOCKDOWN", "System Secured", "Contact Admin", "");
+  closeLock(1); delay(LOCK_OPERATION_DELAY); closeLock(2);
+  playBuzzer("alert");
+  logParcelHistory("SYSTEM", "EMERGENCY_LOCKDOWN");
+}
+
+void resetSystem() {
+  system_state.current_parcel_id = "";
+  system_state.current_qr_code = "";
+  system_state.lock1_open = false;
+  system_state.lock2_open = false;
+  system_state.valid_scan = false;
+  closeLocksAfterDelivery();
+  displayLCD("SYSTEM RESET", "Ready for next parcel", "", "");
+}
+
+void generateDeviceId() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char macStr[18];
+  snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  system_state.device_id = "PARCELBOX_" + String(macStr);
+}
+
+void debugPrint(String msg) {
+  Serial.print("[ESP32] ");
+  Serial.println(msg);
 }
