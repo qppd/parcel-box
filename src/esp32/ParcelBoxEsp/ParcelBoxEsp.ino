@@ -17,6 +17,7 @@
 
 // ESP-NOW library
 #include <esp_now.h>
+#include <esp_wifi.h>
 
 // ============================================================================
 // HARDWARE SERIAL PORTS
@@ -230,6 +231,9 @@ void setup() {
   } else {
     Serial.println("[SETUP 7/7] Firebase SKIPPED (no WiFi)"); Serial.flush();
   }
+
+  // ── Step 8: ESP-NOW Receiver ──────────────────────────────────────────────
+  setupEspNowReceiver();
 
   // ── Ready ─────────────────────────────────────────────────────────────────
   displayLCD("SYSTEM READY", "Waiting for parcel",

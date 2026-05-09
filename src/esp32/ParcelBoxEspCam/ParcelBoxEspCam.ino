@@ -15,7 +15,7 @@
 #include <Arduino.h>
 #include <ESP32QRCodeReader.h>
 #include <esp_now.h>
-#include <WiFi.h>
+#include "WiFiManagerCustom.h"
 
 // ============================================================================
 // CONFIGURATION - UPDATE THESE BEFORE DEPLOYMENT
@@ -42,6 +42,7 @@ typedef struct __attribute__((packed)) {
 // ============================================================================
 ESP32QRCodeReader reader(CAMERA_MODEL_AI_THINKER);
 ESPNOW_QRPacket_t packet;
+WiFiManagerCustom wifiManager;
 
 // Debounce control
 unsigned long lastScanTime = 0;
@@ -85,6 +86,14 @@ void setup()
     reader.beginOnCore(1);
     Serial.println("[SETUP] QR reader started on Core 1");
 
+    // Connect to WiFi using WiFiManager (captive portal for credentials)
+    Serial.println("[SETUP] Starting WiFi Manager for ESP-NOW...");
+    if (wifiManager.begin("ParcelBoxCam_Setup", "password123")) {
+        Serial.println("[SETUP] WiFi connected, channel: " + String(WiFi.channel()));
+    } else {
+        Serial.println("[SETUP] WiFi FAILED - ESP-NOW may not work");
+    }
+
     // Initialize ESP-NOW
     Serial.println("[SETUP] Initializing ESP-NOW...");
     setupEspNow();
@@ -105,6 +114,9 @@ void setup()
 // ============================================================================
 void loop()
 {
+    // Maintain WiFi connection (reconnects if dropped)
+    wifiManager.reconnect();
+
     delay(5000);
     // Print heartbeat
     static unsigned long lastHeartbeat = 0;
@@ -119,8 +131,6 @@ void loop()
 // ============================================================================
 void setupEspNow()
 {
-    WiFi.mode(WIFI_STA);
-
     if (esp_now_init() != ESP_OK) {
         Serial.println("[ESPNOW] ERROR: Init failed");
         return;
