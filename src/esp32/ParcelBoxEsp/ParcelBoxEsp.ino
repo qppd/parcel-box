@@ -12,6 +12,8 @@
 // Custom configuration modules
 #include "PINS_CONFIG.h"
 #include "FirebaseConfig.h"
+#include "FirebaseManager.h"
+#include "ParcelBoxComm.h"
 #include "WiFiManagerCustom.h"
 #include "ESPNOW_CONFIG.h"
 
@@ -26,11 +28,9 @@ HardwareSerial sim800l(2);    // UART2 for SIM800L (GPIO16 RX / GPIO17 TX)
 HardwareSerial qrScanner(1);  // UART1 for QR Scanner (GPIO33 RX / GPIO26 TX)
 
 // ============================================================================
-// FIREBASE AND NETWORK OBJECTS
+// COMMUNICATION ORCHESTRATOR
 // ============================================================================
-FirebaseData fbdo;
-FirebaseAuth auth;
-FirebaseConfig config;
+ParcelBoxComm comms;
 WiFiManagerCustom wifiManager;
 Preferences preferences;
 
@@ -112,10 +112,6 @@ void setupWiFi();
 void initializeNTP();
 void checkWiFiConnection();
 void reconnectWiFi();
-void initializeFirebase();
-void registerDeviceInFirebase();
-void updateFirebaseStatus();
-void logParcelHistory(String parcel_id, String event);
 
 // LCD
 void setupI2C_LCD();
@@ -222,14 +218,21 @@ void setup() {
   setupWiFi();
   Serial.println("[SETUP 6/7] WiFi result: " + String(system_state.wifi_connected ? "CONNECTED" : "OFFLINE")); Serial.flush();
 
-  // ── Step 7: Firebase ──────────────────────────────────────────────────────
+  // ── Step 7: Firebase + ESP-NOW ──────────────────────────────────────────
   if (system_state.wifi_connected) {
-    Serial.println("[SETUP 7/7] Initializing Firebase..."); Serial.flush();
-    displayLCD("Initializing", "Firebase...", "", "");
-    initializeFirebase();
-    Serial.println("[SETUP 7/7] Firebase result: " + String(system_state.firebase_connected ? "CONNECTED" : "FAILED")); Serial.flush();
+    Serial.println("[SETUP 7/7] Initializing Communication System..."); Serial.flush();
+    displayLCD("Initializing", "Communications", "", "");
+    
+    // Initialize unified communication (Firebase + ESP-NOW)
+    // Camera MAC address should be configured in ESPNOW_CONFIG.h
+    uint8_t cameraMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // Broadcast for now, update with actual MAC
+    comms.begin(system_state.device_id.c_str(), cameraMac);
+    comms.setup();
+    
+    system_state.firebase_connected = comms.getFirebaseManager()->isReady();
+    Serial.println("[SETUP 7/7] Communication result: " + String(system_state.firebase_connected ? "CONNECTED" : "FAILED")); Serial.flush();
   } else {
-    Serial.println("[SETUP 7/7] Firebase SKIPPED (no WiFi)"); Serial.flush();
+    Serial.println("[SETUP 7/7] Communication SKIPPED (no WiFi)"); Serial.flush();
   }
 
   // ── Step 8: ESP-NOW Receiver ──────────────────────────────────────────────
@@ -292,12 +295,19 @@ void loop() {
     }
   }
 
-  // Update Firebase status at regular intervals
-  if (millis() - lastFirebaseUpdate > FIREBASE_UPDATE_INTERVAL) {
-    lastFirebaseUpdate = millis();
-    if (system_state.firebase_connected) {
-      updateFirebaseStatus();
-    }
+  // Handle all communications (Firebase streams + ESP-NOW)
+  if (system_state.firebase_connected) {
+    comms.handle();
+    
+    // Update lock status
+    auto fbMgr = comms.getFirebaseManager();
+    fbMgr->updateLockStatus(
+      system_state.device_id,
+      system_state.lock1_open,
+      system_state.lock2_open,
+      system_state.door1_open,
+      system_state.door2_open
+    );
   }
 
   // System health check
@@ -587,13 +597,8 @@ void handleDoorClosed(int doorNum) {
     displayLCD("Parcel Locked", "Delivery complete", "", "");
 
     // Log delivery event
-    logParcelHistory(system_state.current_parcel_id, "PARCEL_DELIVERED");
-
-    // Update parcel status in Firebase
     if (system_state.firebase_connected && system_state.current_parcel_id.length() > 0) {
-      String parcelPath = String(ParcelBoxFirebaseConfig::getParcelsDatabasePath()) +
-                          "/" + system_state.current_parcel_id + "/status";
-      Firebase.RTDB.setString(&fbdo, parcelPath.c_str(), "delivered");
+      firebaseManager.logParcelEvent(system_state.device_id, system_state.current_parcel_id, "PARCEL_DELIVERED");
     }
 
     delay(2000);
@@ -975,7 +980,9 @@ void handleParcelScanned(String qr_code) {
   displayLCD("QR SCANNED", qr_code, "Validating...", "");
 
   // Log scan event
-  logParcelHistory(qr_code, "QR_SCANNED");
+  if (system_state.firebase_connected) {
+    firebaseManager.logParcelEvent(system_state.device_id, qr_code, "QR_SCANNED");
+  }
 
   // Validate QR code with backend
   validateAndOpenLocks(qr_code);
@@ -996,7 +1003,9 @@ void validateAndOpenLocks(String qr_code) {
         system_state.current_parcel_id = qr_code;
 
         debugPrint("Parcel found in Firebase");
-        logParcelHistory(qr_code, "PARCEL_FOUND");
+        if (system_state.firebase_connected) {
+          firebaseManager.logParcelEvent(system_state.device_id, qr_code, "PARCEL_FOUND");
+        }
       }
     }
   } else {
@@ -1012,7 +1021,9 @@ void validateAndOpenLocks(String qr_code) {
     system_state.valid_scan = true;
 
     displayLCD("Access Granted", "Opening locks...", "", "");
-    logParcelHistory(qr_code, "VALIDATION_SUCCESS");
+    if (system_state.firebase_connected) {
+      firebaseManager.logParcelEvent(system_state.device_id, qr_code, "VALIDATION_SUCCESS");
+    }
 
     // Open parcel door (Lock #1)
     openLock(1);
@@ -1026,9 +1037,6 @@ void validateAndOpenLocks(String qr_code) {
     playBuzzer("success");
     displayLCD("DOORS OPEN", "Place parcel in box", "Complete payment", "Door closes auto");
 
-    // Update Firebase
-    updateFirebaseStatus();
-
   } else {
     debugPrint("QR Validation: FAILED");
     system_state.valid_scan = false;
@@ -1037,7 +1045,9 @@ void validateAndOpenLocks(String qr_code) {
     playBuzzer("alert");
     displayLCD("Access Denied", "Invalid QR Code", "Try again", "");
 
-    logParcelHistory(qr_code, "VALIDATION_FAILED");
+    if (system_state.firebase_connected) {
+      firebaseManager.logParcelEvent(system_state.device_id, qr_code, "VALIDATION_FAILED");
+    }
     delay(3000);
     displayLCD("READY", "Scan parcel QR",
                "WiFi: " + String(system_state.wifi_connected ? "OK" : "---"),
@@ -1108,7 +1118,9 @@ void emergencyLockdown() {
   closeLock(2);
   playBuzzer("alert");
 
-  logParcelHistory("SYSTEM", "EMERGENCY_LOCKDOWN");
+  if (system_state.firebase_connected) {
+    firebaseManager.logParcelEvent(system_state.device_id, "SYSTEM", "EMERGENCY_LOCKDOWN");
+  }
 }
 
 void resetSystem() {
