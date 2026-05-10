@@ -46,6 +46,8 @@ struct SystemState {
   String device_id = "";
   String current_parcel_id = "";
   String current_qr_code = "";
+  String current_receiver_phone = "";
+  String current_receiver_name = "";
 
   bool lock1_open = false;
   bool lock2_open = false;
@@ -60,6 +62,11 @@ struct SystemState {
   bool wifi_connected = false;
   bool firebase_connected = false;
   bool valid_scan = false;
+
+  // SMS trigger counters & flags
+  int invalid_scan_count = 0;
+  bool door_breach_alerted = false;     // already sent breach SMS for this breach event
+  bool valid_delivery_sms_sent = false; // already sent delivery-success SMS for this parcel
 } system_state;
 
 // ============================================================================
@@ -182,6 +189,13 @@ void onEmergencyFromFirebase();
 void generateDeviceId();
 void checkSystemHealth();
 void debugPrint(String msg);
+
+// ============================================================================
+// SMS TRIGGER FUNCTIONS
+// ============================================================================
+void smsSendValidDelivery();
+void smsSendInvalidAttempt();
+void smsSendDoorBreach();
 
 // ============================================================================
 // SETUP FUNCTION
@@ -441,24 +455,39 @@ void checkDoorSensors() {
   bool nd1 = digitalRead(DOOR_SENSOR_1_PIN) == HIGH;
   bool nd2 = digitalRead(DOOR_SENSOR_2_PIN) == HIGH;
 
+  // — Door 1 (parcel door) —
   if (nd1 != system_state.door1_open) {
     system_state.door1_open = nd1;
     if (system_state.door1_open) {
       debugPrint("Parcel door OPENED");
+      // Door opened WITHOUT a valid scan — possible break-in
+      if (!system_state.valid_scan) {
+        smsSendDoorBreach();
+      }
     } else {
       debugPrint("Parcel door CLOSED");
       handleDoorClosed(1);
     }
   }
 
+  // — Door 2 (payment box door) —
   if (nd2 != system_state.door2_open) {
     system_state.door2_open = nd2;
     if (system_state.door2_open) {
       debugPrint("Payment box door OPENED");
+      // Door opened WITHOUT a valid scan — possible break-in
+      if (!system_state.valid_scan) {
+        smsSendDoorBreach();
+      }
     } else {
       debugPrint("Payment box door CLOSED");
       handleDoorClosed(2);
     }
+  }
+
+  // Reset breach alert flag when BOTH doors fully close & system resets to ready state
+  if (!nd1 && !nd2 && system_state.current_parcel_id == "") {
+    system_state.door_breach_alerted = false;
   }
 }
 
@@ -467,6 +496,11 @@ void handleDoorClosed(int doorNum) {
     system_state.lock1_open = false;
     debugPrint("Parcel door closed - marking as delivered");
     displayLCD("Parcel Locked", "Delivery complete", "", "");
+
+    // Send SMS for valid delivery (locks opened via valid QR, door closed)
+    if (system_state.valid_scan && !system_state.valid_delivery_sms_sent) {
+      smsSendValidDelivery();
+    }
 
     if (system_state.firebase_connected && system_state.current_parcel_id.length() > 0) {
       logParcelHistory(system_state.current_parcel_id, "PARCEL_DELIVERED");
@@ -478,6 +512,10 @@ void handleDoorClosed(int doorNum) {
                "FB: " + String(system_state.firebase_connected ? "OK" : "---"));
     system_state.current_parcel_id = "";
     system_state.current_qr_code = "";
+    system_state.current_receiver_phone = "";
+    system_state.current_receiver_name = "";
+    system_state.valid_scan = false;
+    system_state.valid_delivery_sms_sent = false;
   } else if (doorNum == 2) {
     system_state.lock2_open = false;
     debugPrint("Payment box closed");
@@ -520,13 +558,77 @@ void sendSMS(String phone, String message) {
   }
   debugPrint("Sending SMS to: " + phone);
   sim800l.println("AT+CMGF=1"); delay(100);
-  sim800l.print("AT+CMGS=\""); sim800l.print(phone); sim800l.println("\""); delay(100);
+  sim800l.print("AT+CMGS=\"");
+  sim800l.print(phone);
+  sim800l.println("\""); delay(100);
   sim800l.print(message);
   sim800l.write(26);
   delay(1000);
   system_state.last_sms_time = millis();
   debugPrint("SMS sent!");
   playBuzzer("click");
+}
+
+// ============================================================================
+// SMS TRIGGERS
+// ============================================================================
+
+/**
+ * smsSendValidDelivery() — triggered when:
+ *   - QR scan was VALID
+ *   - Locks were opened
+ *   - Door 1 (parcel door) closes
+ * Sends to: receiver's contact number (from Firebase)
+ */
+void smsSendValidDelivery() {
+  if (system_state.current_receiver_phone.length() == 0) {
+    debugPrint("[SMS] No receiver phone — skipping delivery SMS");
+    return;
+  }
+  String msg = "ParcelBox: Your parcel " + system_state.current_parcel_id +
+               " has been delivered successfully. Please check locker " +
+               system_state.current_qr_code + ". - ParcelBox System";
+  sendSMS(system_state.current_receiver_phone, msg);
+  system_state.valid_delivery_sms_sent = true;
+  logParcelHistory(system_state.current_parcel_id, "SMS_DELIVERY_SENT");
+}
+
+/**
+ * smsSendInvalidAttempt() — triggered when:
+ *   - Invalid QR scanned 3 times in a row (consecutive)
+ * Sends to: admin/monitoring number (device owner)
+ */
+void smsSendInvalidAttempt() {
+  String msg = "[ALERT] ParcelBox " + system_state.device_id +
+               ": 3 invalid QR attempts detected. Possible tampering. - ParcelBox System";
+  // Send to a predefined monitoring/admin number
+  // The admin number could be stored in Preferences; for now, use a placeholder.
+  // Replace "+63XXXXXXXXXX" with your actual admin phone number:
+  String adminPhone = "+639123456789";
+  sendSMS(adminPhone, msg);
+  logParcelHistory("SYSTEM", "SMS_INVALID_ATTEMPT_3X");
+}
+
+/**
+ * smsSendDoorBreach() — triggered when:
+ *   - ANY door opens WITHOUT a valid scan (no valid QR scan in progress)
+ *   - Only sends once per breach event (door_breach_alerted flag)
+ * Sends to: admin/monitoring number
+ */
+void smsSendDoorBreach() {
+  if (system_state.door_breach_alerted) return;  // already alerted for this breach
+  system_state.door_breach_alerted = true;
+
+  String doorLabel = "";
+  if (system_state.door1_open) doorLabel += "Parcel Door ";
+  if (system_state.door2_open) doorLabel += "Payment Box ";
+  if (doorLabel == "") doorLabel = "Unknown Door";
+
+  String msg = "[BREACH ALERT] ParcelBox " + system_state.device_id +
+               ": " + doorLabel + "opened without authorization! - ParcelBox System";
+  String adminPhone = "+639123456789";
+  sendSMS(adminPhone, msg);
+  logParcelHistory("SYSTEM", "SMS_DOOR_BREACH");
 }
 
 // ============================================================================
@@ -951,19 +1053,39 @@ void validateAndOpenLocks(String qr_code) {
         is_valid = true;
         system_state.current_parcel_id = qr_code;
         debugPrint("Parcel found in Firebase");
+
+        // — Extract receiver contact info for SMS —
+        FirebaseJson* jsonPtr = fbdo.to<FirebaseJson*>();
+        if (jsonPtr) {
+          FirebaseJsonData jsonData;
+          if (jsonPtr->get(jsonData, "contact_number")) {
+            system_state.current_receiver_phone = jsonData.stringValue;
+          }
+          if (jsonPtr->get(jsonData, "receiver_name")) {
+            system_state.current_receiver_name = jsonData.stringValue;
+          }
+          debugPrint("Receiver phone: " + system_state.current_receiver_phone);
+        }
+
         logParcelHistory(qr_code, "PARCEL_FOUND");
+
+        // — Reset invalid scan counter on success —
+        system_state.invalid_scan_count = 0;
       }
     }
   } else {
     if (qr_code.length() >= 5) {
       is_valid = true;
       system_state.current_parcel_id = qr_code;
+      // Reset invalid scan counter on offline success
+      system_state.invalid_scan_count = 0;
     }
   }
 
   if (is_valid) {
     debugPrint("QR Validation: SUCCESS");
     system_state.valid_scan = true;
+    system_state.valid_delivery_sms_sent = false;
     displayLCD("Access Granted", "Opening locks...", "", "");
     logParcelHistory(qr_code, "VALIDATION_SUCCESS");
 
@@ -980,6 +1102,15 @@ void validateAndOpenLocks(String qr_code) {
     system_state.valid_scan = false;
     playBuzzer("alert");
     displayLCD("Access Denied", "Invalid QR Code", "Try again", "");
+
+    // — SMS: invalid count (3 consecutive failures) —
+    system_state.invalid_scan_count++;
+    debugPrint("Invalid scan count: " + String(system_state.invalid_scan_count));
+    if (system_state.invalid_scan_count >= 3) {
+      smsSendInvalidAttempt();
+      system_state.invalid_scan_count = 0;  // reset after alert sent
+    }
+
     logParcelHistory(qr_code, "VALIDATION_FAILED");
     delay(3000);
     displayLCD("READY", "Scan parcel QR",
@@ -1021,9 +1152,14 @@ void emergencyLockdown() {
 void resetSystem() {
   system_state.current_parcel_id = "";
   system_state.current_qr_code = "";
+  system_state.current_receiver_phone = "";
+  system_state.current_receiver_name = "";
   system_state.lock1_open = false;
   system_state.lock2_open = false;
   system_state.valid_scan = false;
+  system_state.valid_delivery_sms_sent = false;
+  system_state.invalid_scan_count = 0;
+  system_state.door_breach_alerted = false;
   closeLocksAfterDelivery();
   displayLCD("SYSTEM RESET", "Ready for next parcel", "", "");
 }
