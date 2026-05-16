@@ -214,6 +214,8 @@ void setup() {
   pinMode(DOOR_SENSOR_1_PIN, INPUT_PULLUP);
   pinMode(DOOR_SENSOR_2_PIN, INPUT_PULLUP);
   pinMode(SIM800L_RST_PIN, OUTPUT);
+  pinMode(RELAY_1_PIN, OUTPUT);
+  pinMode(RELAY_2_PIN, OUTPUT);
   digitalWrite(RELAY_1_PIN, HIGH);
   digitalWrite(RELAY_2_PIN, HIGH);
   digitalWrite(SIM800L_RST_PIN, HIGH);
@@ -504,6 +506,8 @@ void handleDoorClosed(int doorNum) {
 
     if (system_state.firebase_connected && system_state.current_parcel_id.length() > 0) {
       logParcelHistory(system_state.current_parcel_id, "PARCEL_DELIVERED");
+      digitalWrite(RELAY_1_PIN, HIGH);
+      digitalWrite(RELAY_2_PIN, HIGH);
     }
 
     delay(2000);
@@ -629,6 +633,7 @@ void smsSendDoorBreach() {
   String adminPhone = "+639123456789";
   sendSMS(adminPhone, msg);
   logParcelHistory("SYSTEM", "SMS_DOOR_BREACH");
+  
 }
 
 // ============================================================================
