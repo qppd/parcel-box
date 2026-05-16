@@ -143,6 +143,8 @@ void displayLCD(String line1, String line2 = "", String line3 = "", String line4
 void openLock(int lockNum);
 void closeLock(int lockNum);
 void playBuzzer(String tone_type);
+void playBreachBuzzer();
+void stopBreachBuzzer();
 void checkDoorSensors();
 void handleDoorClosed(int doorNum);
 void initSIM800L();
@@ -300,6 +302,14 @@ void loop() {
   // Monitor door sensors
   checkDoorSensors();
 
+  // Breach Buzzer Alert: Non-stop buzzing if any door is open without a valid scan
+  if ((system_state.door1_open || system_state.door2_open) && !system_state.valid_scan) {
+    playBreachBuzzer();
+  } else {
+    stopBreachBuzzer();
+  }
+
+
   // Continuous reed switch monitoring output (only when enabled)
   if (reed1_monitor || reed2_monitor) {
     if (millis() - lastReedPrint >= 500) {
@@ -447,6 +457,14 @@ void playBuzzer(String tone_type) {
   } else if (tone_type == "click") {
     ledcWriteTone(BUZZER_PIN, 1500); delay(50);
   }
+  ledcWriteTone(BUZZER_PIN, 0);
+}
+
+void playBreachBuzzer() {
+  ledcWriteTone(BUZZER_PIN, 2000); // High pitch alert for breach
+}
+
+void stopBreachBuzzer() {
   ledcWriteTone(BUZZER_PIN, 0);
 }
 
